@@ -45,7 +45,7 @@ export class GeminiStrategy implements ImageGenerationStrategy {
 
     if (!response.ok) {
       if (data.error === 'INSUFFICIENT_CREDITS') {
-        throw new Error('Você não tem saldo suficiente. Adquira mais créditos!');
+        throw new Error('Sua cota de créditos acabou. Solicite mais créditos ao administrador.');
       } else if (response.status === 401) {
         throw new Error('Sessão expirada ou não autenticada. Por favor, faça login novamente.');
       } else if (response.status === 404) {

@@ -326,7 +326,7 @@ export default function App() {
         });
       } else {
         setReferenceImages(prev => ({ ...prev, [side]: optimized.dataUrl }));
-        // Permanece no Passo 1: O avanço ocorre apenas por clique intencional do lojista
+        // Permanece no Passo 1: O avanço ocorre apenas por clique intencional do usuário
       }
     } catch (err: unknown) {
       console.error('Erro ao otimizar imagem:', err);
