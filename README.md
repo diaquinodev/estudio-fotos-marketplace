@@ -122,12 +122,14 @@ TEST_DATABASE_URL=postgres://usuario:senha@localhost:5432/banco_descartavel npm 
 npm run build                      # exige apenas as variáveis públicas do Supabase (valores fictícios bastam)
 ```
 
-Administração da cota (não há tela de administração; ver limitações). Novos usuários recebem 3 créditos (valor definido na migração `20260929120000_profiles.sql`). Para ajustar a cota, use o SQL Editor do Supabase (service role):
+Administração da cota (não há tela de administração; ver limitações). Novos usuários recebem 3 créditos (valor definido na migração `20260929120000_profiles.sql`). No SQL Editor do Supabase:
 
 ```sql
+update public.profiles set credits = credits + 20 where email = 'usuario@exemplo.com.br';   -- soma 20 créditos
 update public.profiles set role = 'admin' where email = 'admin@exemplo.com.br';
-select public.admin_grant_credits('<uuid do usuário>', 20);   -- soma 20 créditos (aceita valor negativo)
 ```
+
+A função `public.admin_grant_credits(user_id, delta)` faz o mesmo ajuste via RPC e só aceita chamadas de um usuário com `role = 'admin'` ou do service role (o teste de migração cobre o caso de usuário comum negado e de admin permitido).
 
 ## Decisões técnicas
 
