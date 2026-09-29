@@ -32,19 +32,23 @@ export interface GenerateApiRequest {
   highFidelityJson?: string;
 }
 
-// Curated high-fidelity fashion studio mock images for end-to-end testing
-const MOCK_STUDIO_IMAGES = [
-  'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=1200&q=85',
-  'https://images.unsplash.com/photo-1529139574466-a303027c1d8b?auto=format&fit=crop&w=1200&q=85',
-  'https://images.unsplash.com/photo-1509631179647-0177331693ae?auto=format&fit=crop&w=1200&q=85',
-  'https://images.unsplash.com/photo-1490481651871-ab68de25d43d?auto=format&fit=crop&w=1200&q=85',
-  'https://images.unsplash.com/photo-1496747611176-843222e1e57c?auto=format&fit=crop&w=1200&q=85',
-  'https://images.unsplash.com/photo-1539109136881-3be0616acf4b?auto=format&fit=crop&w=1200&q=85',
-  'https://images.unsplash.com/photo-1581044777550-4cfa60707c03?auto=format&fit=crop&w=1200&q=85',
-  'https://images.unsplash.com/photo-1558769132-cb1aea458c5e?auto=format&fit=crop&w=1200&q=85',
-  'https://images.unsplash.com/photo-1485230895905-ec40ba36b9bc?auto=format&fit=crop&w=1200&q=85',
-  'https://images.unsplash.com/photo-1479064555552-3ef4979f8908?auto=format&fit=crop&w=1200&q=85',
-];
+/**
+ * Modo simulado, SOMENTE para desenvolvimento local: exige MOCK_GENERATION=true e NODE_ENV diferente de
+ * "production". Nunca debita créditos e devolve um placeholder gerado localmente (sem imagens externas).
+ */
+function isMockEnabled(): boolean {
+  return process.env.MOCK_GENERATION?.trim() === 'true' && process.env.NODE_ENV !== 'production';
+}
+
+function buildMockPlaceholder(): string {
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200">' +
+    '<rect width="1200" height="1200" fill="#e2e8f0"/>' +
+    '<text x="600" y="590" font-family="sans-serif" font-size="44" text-anchor="middle" fill="#334155">IMAGEM SIMULADA</text>' +
+    '<text x="600" y="650" font-family="sans-serif" font-size="30" text-anchor="middle" fill="#64748b">MOCK_GENERATION (somente desenvolvimento)</text>' +
+    '</svg>';
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+}
 
 // Service role admin client to bypass RLS when performing atomic credit deductions
 const supabaseAdmin = createSupabaseAdminClient(
@@ -201,7 +205,7 @@ async function deductCreditAtomically(
 
 export async function POST(req: NextRequest) {
   console.log('>>> [/api/generate] HIT! Headers & Method:', req.method);
-  console.log('>>> [/api/generate] MOCK_GENERATION flag:', JSON.stringify(process.env.MOCK_GENERATION));
+  console.log('>>> [/api/generate] MOCK_GENERATION flag:', isMockEnabled());
   try {
     const serverSupabase = await createSupabaseServerClient();
 
@@ -286,27 +290,15 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // 4. Modo Mock para Testes End-to-End Sem Faturamento GCP
-    const isMockMode = process.env.MOCK_GENERATION?.trim() === 'true';
-    if (isMockMode) {
-      console.log('>>> [/api/generate] MOCK_GENERATION ativa! Simulando geração realista de estúdio fotográfico...');
-
-      // Simulação realista de latência de IA / estúdio (2.5 segundos)
-      await new Promise((resolve) => setTimeout(resolve, 2500));
-
-      // Seleção de foto de estúdio de alta estética para o catálogo
-      const mockImageIndex = Math.floor(Math.random() * MOCK_STUDIO_IMAGES.length);
-      const mockImageUrl = MOCK_STUDIO_IMAGES[mockImageIndex];
-
-      // Dedução atômica real de crédito no banco de dados para validar regras de negócio
-      const deduction = await deductCreditAtomically(supabaseAdmin, user.id, serverSupabase);
-      console.log('>>> [/api/generate] Mock concluído com sucesso. Novo saldo:', deduction.remainingCredits);
-
+    // 4. Modo simulado (apenas desenvolvimento, flag explícita). Nunca debita créditos.
+    if (isMockEnabled()) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
       return NextResponse.json({
         success: true,
-        url: mockImageUrl,
-        imageUrl: mockImageUrl,
-        remainingCredits: deduction.remainingCredits,
+        mock: true,
+        url: buildMockPlaceholder(),
+        imageUrl: buildMockPlaceholder(),
+        remainingCredits: availableCredits,
       });
     }
 
@@ -373,21 +365,6 @@ export async function POST(req: NextRequest) {
     // 7. Invocação do Modelo com Resiliência e Exponential Backoff
     const ai = new GoogleGenAI({ apiKey });
 
-    // Helper interno: entrega um mock de alta qualidade para o lojista quando a cota Gemini se esgota
-    const deliverMockFallback = async (reason: string): Promise<NextResponse> => {
-      console.warn('>>> [/api/generate]', reason);
-      await new Promise((resolve) => setTimeout(resolve, 800));
-      const mockIdx = Math.floor(Math.random() * MOCK_STUDIO_IMAGES.length);
-      const mockUrl = MOCK_STUDIO_IMAGES[mockIdx];
-      const deduction = await deductCreditAtomically(supabaseAdmin, user.id, serverSupabase);
-      return NextResponse.json({
-        success: true,
-        url: mockUrl,
-        imageUrl: mockUrl,
-        remainingCredits: deduction.remainingCredits,
-      });
-    };
-
     let response: Awaited<ReturnType<typeof ai.models.generateContent>>;
     try {
       response = await executeWithRetry(async () => {
@@ -404,16 +381,8 @@ export async function POST(req: NextRequest) {
         });
       }, 2, 1200);
     } catch (geminiErr: unknown) {
-      const errMsg = geminiErr instanceof Error ? geminiErr.message : String(geminiErr);
-      const status = (geminiErr as { status?: number })?.status;
-      const is429 = status === 429 || errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED');
 
-      if (is429) {
-        return await deliverMockFallback(
-          'Gemini Quota 429 encountered. Falling back to High-Quality Mock Studio Generation.'
-        );
-      }
-      // Para outros erros de invocação, re-lança para ser capturado pelo catch externo
+      // Qualquer falha do Gemini (inclusive cota 429) vira erro explícito: nada de imagem substituta nem débito.
       throw geminiErr;
     }
 
