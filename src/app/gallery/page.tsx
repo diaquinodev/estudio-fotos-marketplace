@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
 import { 
   Image as ImageIcon, 
@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { Sidebar } from '@/components/Sidebar';
 import { createClient } from '@/utils/supabase/client';
-import { loadState } from '@/services/storage';
+import { SHOT_TYPES } from '@/types';
 
 interface GalleryItem {
   id: string;
@@ -28,85 +28,121 @@ interface GalleryItem {
   instruction?: string;
 }
 
+interface GenerationRow {
+  id: string;
+  kind: 'generate' | 'edit';
+  shot_type: string | null;
+  prompt: string | null;
+  storage_path: string;
+  created_at: string;
+}
+
+const BADGE_STYLES = [
+  { bg: 'bg-indigo-50 border-indigo-200', text: 'text-indigo-700' },
+  { bg: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-700' },
+  { bg: 'bg-amber-50 border-amber-200', text: 'text-amber-700' },
+  { bg: 'bg-purple-50 border-purple-200', text: 'text-purple-700' },
+  { bg: 'bg-rose-50 border-rose-200', text: 'text-rose-700' },
+];
+
+const NEUTRAL_BADGE = { bg: 'bg-slate-100 border-slate-200', text: 'text-slate-700' };
+
+/** Rótulo e cor por tipo de tomada (ids de SHOT_TYPES) + retoque. */
 const SHOT_BADGES: Record<string, { label: string; bg: string; text: string }> = {
-  marketplace_cover: { label: 'Capa Marketplace', bg: 'bg-indigo-50 border-indigo-200', text: 'text-indigo-700' },
-  back_view: { label: 'Costas & Caimento', bg: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-700' },
-  texture_macro: { label: 'Macro & Tecido', bg: 'bg-amber-50 border-amber-200', text: 'text-amber-700' },
-  editorial_lifestyle: { label: 'Editorial Lifestyle', bg: 'bg-purple-50 border-purple-200', text: 'text-purple-700' },
-  walking_motion: { label: 'Movimento Catwalk', bg: 'bg-rose-50 border-rose-200', text: 'text-rose-700' },
+  ...Object.fromEntries(
+    SHOT_TYPES.map((shot, idx) => [
+      shot.id,
+      { label: shot.label.replace(/^\d+\.\s*/, ''), ...BADGE_STYLES[idx % BADGE_STYLES.length] },
+    ]),
+  ),
+  edit: { label: 'Retoque', ...NEUTRAL_BADGE },
+  custom: { label: 'Personalizada', ...NEUTRAL_BADGE },
 };
+
+const FILTERS = [
+  { id: 'all', label: 'Todas as fotos' },
+  ...SHOT_TYPES.slice(0, 4).map((shot) => ({ id: shot.id, label: SHOT_BADGES[shot.id].label })),
+  { id: 'edit', label: 'Retoques' },
+];
+
+const SIGNED_URL_TTL_SECONDS = 3600;
 
 export default function GalleryPage() {
   const [items, setItems] = useState<GalleryItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedFilter, setSelectedFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeLightbox, setActiveLightbox] = useState<GalleryItem | null>(null);
 
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
-  useEffect(() => {
-    fetchGalleryItems();
-  }, []);
-
-  const fetchGalleryItems = async () => {
+  const fetchGalleryItems = useCallback(async () => {
     setLoading(true);
-    let loadedItems: GalleryItem[] = [];
+    setLoadError(null);
 
     try {
-      // 1. Tenta buscar no Supabase
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        const { data: dbGenerations, error } = await supabase
-          .from('generations')
-          .select('*')
-          .eq('user_id', user.id)
-          .order('created_at', { ascending: false });
-
-        if (!error && dbGenerations && dbGenerations.length > 0) {
-          loadedItems = dbGenerations.map((item: any) => ({
-            id: item.id || String(Math.random()),
-            url: item.image_url || item.url,
-            type: item.shot_type || item.type || 'marketplace_cover',
-            label: SHOT_BADGES[item.shot_type || item.type]?.label || 'Ensaio Estúdio',
-            created_at: new Date(item.created_at || Date.now()).toLocaleDateString('pt-BR', {
-              day: '2-digit',
-              month: 'short',
-              year: 'numeric'
-            }),
-            instruction: item.prompt || item.instruction
-          }));
-        }
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setItems([]);
+        return;
       }
 
-      // 2. Se o Supabase não retornou itens, busca do IndexedDB (sessão atual do estúdio)
-      if (loadedItems.length === 0) {
-        const localState = await loadState();
-        if (localState?.generatedImages && Array.isArray(localState.generatedImages)) {
-          const validLocal = localState.generatedImages.filter((img: any) => img.url);
-          if (validLocal.length > 0) {
-            loadedItems = validLocal.map((img: any, idx: number) => ({
-              id: img.id || `local-${idx}`,
-              url: img.url,
-              type: img.type || 'marketplace_cover',
-              label: SHOT_BADGES[img.type]?.label || `Foto #${idx + 1}`,
-              created_at: new Date().toLocaleDateString('pt-BR', {
+      const { data: rows, error } = await supabase
+        .from('generations')
+        .select('id, kind, shot_type, prompt, storage_path, created_at')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(200)
+        .returns<GenerationRow[]>();
+      if (error) throw new Error(error.message);
+
+      const generations = rows ?? [];
+      const { data: signed, error: signError } = await supabase.storage
+        .from('generations')
+        .createSignedUrls(
+          generations.map((row) => row.storage_path),
+          SIGNED_URL_TTL_SECONDS,
+        );
+      if (signError) throw new Error(signError.message);
+
+      const urlByPath = new Map((signed ?? []).map((entry) => [entry.path, entry.signedUrl]));
+      setItems(
+        generations.flatMap((row) => {
+          const url = urlByPath.get(row.storage_path);
+          if (!url) return [];
+          const type = row.shot_type ?? 'custom';
+          return [
+            {
+              id: row.id,
+              url,
+              type,
+              label: SHOT_BADGES[type]?.label ?? 'Foto gerada',
+              created_at: new Date(row.created_at).toLocaleDateString('pt-BR', {
                 day: '2-digit',
                 month: 'short',
-                year: 'numeric'
+                year: 'numeric',
               }),
-              instruction: img.instruction
-            }));
-          }
-        }
-      }
+              instruction: row.prompt ?? undefined,
+            },
+          ];
+        }),
+      );
     } catch (err) {
-      console.error('Erro ao carregar galeria:', err);
+      console.error('Erro ao carregar galeria:', err instanceof Error ? err.message : err);
+      setLoadError('Não foi possível carregar a galeria. Tente atualizar em instantes.');
+      setItems([]);
     } finally {
-      setItems(loadedItems);
       setLoading(false);
     }
-  };
+  }, [supabase]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- carga inicial dos dados da galeria
+    void fetchGalleryItems();
+  }, [fetchGalleryItems]);
 
   const handleDownload = async (item: GalleryItem, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
@@ -121,8 +157,7 @@ export default function GalleryPage() {
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(blobUrl);
-    } catch (err) {
-      // Fallback para imagens remotas diretas
+    } catch {
       window.open(item.url, '_blank');
     }
   };
@@ -150,7 +185,7 @@ export default function GalleryPage() {
               </span>
             </div>
             <p className="text-xs text-slate-500 font-medium mt-0.5">
-              Todos os seus ensaios e fotos geradas com inteligência artificial.
+              Fotos geradas e retoques salvos na sua conta.
             </p>
           </div>
 
@@ -182,13 +217,7 @@ export default function GalleryPage() {
             {/* Filter Pills */}
             <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0 scrollbar-none">
               <Filter className="w-4 h-4 text-slate-400 shrink-0 ml-1 mr-1" />
-              {[
-                { id: 'all', label: 'Todas as fotos' },
-                { id: 'marketplace_cover', label: 'Capa' },
-                { id: 'back_view', label: 'Costas' },
-                { id: 'texture_macro', label: 'Macro' },
-                { id: 'editorial_lifestyle', label: 'Editorial' },
-              ].map(f => (
+              {FILTERS.map(f => (
                 <button
                   key={f.id}
                   onClick={() => setSelectedFilter(f.id)}
@@ -231,6 +260,10 @@ export default function GalleryPage() {
             </div>
           )}
 
+          {loadError && (
+            <div className="bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold rounded-2xl px-5 py-3">{loadError}</div>
+          )}
+
           {/* Empty State */}
           {!loading && filteredItems.length === 0 && (
             <div className="bg-white rounded-3xl border border-slate-200 p-12 text-center max-w-xl mx-auto my-12 shadow-sm space-y-6">
@@ -244,7 +277,7 @@ export default function GalleryPage() {
                 <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
                   {searchQuery || selectedFilter !== 'all'
                     ? 'Tente ajustar os filtros de busca para encontrar o que procura.'
-                    : 'Gere fotos profissionais em segundos com inteligência artificial para destacar os produtos do seu e-commerce.'
+                    : 'As fotos geradas no estúdio ficam salvas aqui.'
                   }
                 </p>
               </div>
@@ -400,7 +433,7 @@ export default function GalleryPage() {
                   <span>Baixar Imagem em Alta Definição</span>
                 </button>
                 <p className="text-[10px] text-center text-slate-400">
-                  Formato PNG sem perda de qualidade (1200x1200px)
+                  Arquivo original salvo no Storage
                 </p>
               </div>
             </div>
