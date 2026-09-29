@@ -8,21 +8,11 @@ const { rpc, generateContent } = vi.hoisted(() => ({ rpc: vi.fn(), generateConte
 vi.mock('@/utils/supabase/server', () => ({
   createClient: async () => ({
     auth: { getUser: async () => ({ data: { user: { id: 'user-1', email: 'a@exemplo.com.br' } }, error: null }) },
-    from: () => ({
-      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { credits: 5 }, error: null }) }) }),
-      upsert: () => ({ select: () => ({ maybeSingle: async () => ({ data: { credits: 5 }, error: null }) }) }),
-    }),
-    rpc,
   }),
 }));
 
 vi.mock('@supabase/supabase-js', () => ({
-  createClient: () => ({
-    rpc,
-    from: () => ({
-      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { credits: 5 }, error: null }) }) }),
-    }),
-  }),
+  createClient: () => ({ rpc }),
 }));
 
 vi.mock('@google/genai', () => ({
@@ -41,52 +31,118 @@ function makeRequest() {
   });
 }
 
-const creditCalls = () => rpc.mock.calls.filter(([name]) => name === 'decrement_credit');
+const calls = (name: string) => rpc.mock.calls.filter(([fn]) => fn === name);
+
+function mockRpc(reserve: { out_status: string; out_reservation_id: string | null; out_remaining: number } = {
+  out_status: 'ok',
+  out_reservation_id: 'res-1',
+  out_remaining: 4,
+}) {
+  rpc.mockImplementation(async (fn: string) => {
+    if (fn === 'reserve_credit') return { data: [reserve], error: null };
+    if (fn === 'commit_reservation') return { data: true, error: null };
+    if (fn === 'refund_reservation') return { data: 5, error: null };
+    throw new Error(`rpc inesperada ${fn}`);
+  });
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
   vi.stubEnv('GEMINI_API_KEY', 'chave-de-teste');
   vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', 'http://localhost:54321');
-  vi.stubEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY', 'anon');
-  rpc.mockResolvedValue({ data: 4, error: null });
-  vi.spyOn(console, 'log').mockImplementation(() => {});
-  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  vi.stubEnv('SUPABASE_SERVICE_ROLE_KEY', 'service-role-de-teste');
+  mockRpc();
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 
-describe('POST /api/generate — falhas do Gemini não geram imagem falsa nem débito', () => {
-  it('erro 429 do Gemini retorna erro claro, sem imagem substituta e sem debitar', async () => {
+const PNG = { inlineData: { data: 'iVBORw0KGgo=', mimeType: 'image/png' } };
+
+describe('POST /api/generate — reserva antes, estorno em falha', () => {
+  it('sucesso: reserva antes de gerar, confirma depois e devolve o saldo restante', async () => {
+    const order: string[] = [];
+    rpc.mockImplementation(async (fn: string) => {
+      order.push(fn);
+      if (fn === 'reserve_credit') return { data: [{ out_status: 'ok', out_reservation_id: 'res-1', out_remaining: 4 }], error: null };
+      return { data: true, error: null };
+    });
+    generateContent.mockImplementation(async () => {
+      order.push('gemini');
+      return { candidates: [{ content: { parts: [PNG] } }] };
+    });
+
+    const res = await POST(makeRequest());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.url).toMatch(/^data:image\/png;base64,/);
+    expect(body.remainingCredits).toBe(4);
+    expect(order).toEqual(['reserve_credit', 'gemini', 'commit_reservation']);
+  });
+
+  it('erro 429 do Gemini: sem imagem substituta, com estorno', async () => {
     generateContent.mockRejectedValue(Object.assign(new Error('RESOURCE_EXHAUSTED'), { status: 429 }));
     const res = await POST(makeRequest());
     const body = await res.json();
 
     expect(res.status).toBe(429);
-    expect(body.error).toMatch(/alta demanda/i);
     expect(body.url).toBeUndefined();
     expect(JSON.stringify(body)).not.toContain('unsplash');
-    expect(creditCalls()).toHaveLength(0);
+    expect(calls('refund_reservation')).toHaveLength(1);
+    expect(calls('commit_reservation')).toHaveLength(0);
   });
 
-  it('resposta sem imagem retorna 502 e não debita', async () => {
+  it('resposta sem imagem: 502 e estorno', async () => {
     generateContent.mockResolvedValue({ candidates: [{ content: { parts: [{ text: 'sem imagem' }] } }], text: 'sem imagem' });
     const res = await POST(makeRequest());
 
     expect(res.status).toBe(502);
-    expect(creditCalls()).toHaveLength(0);
+    expect(calls('refund_reservation')).toHaveLength(1);
+    expect(calls('commit_reservation')).toHaveLength(0);
   });
 
-  it('bloqueio de segurança retorna 422 e não debita', async () => {
+  it('bloqueio de segurança: 422 e estorno', async () => {
     generateContent.mockResolvedValue({ candidates: [{ finishReason: 'SAFETY' }] });
     const res = await POST(makeRequest());
 
     expect(res.status).toBe(422);
-    expect(creditCalls()).toHaveLength(0);
+    expect(calls('refund_reservation')).toHaveLength(1);
+  });
+
+  it('sem saldo: 403 INSUFFICIENT_CREDITS e o Gemini nem é chamado', async () => {
+    mockRpc({ out_status: 'insufficient', out_reservation_id: null, out_remaining: 0 });
+    const res = await POST(makeRequest());
+    const body = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(body.error).toBe('INSUFFICIENT_CREDITS');
+    expect(generateContent).not.toHaveBeenCalled();
+  });
+
+  it('limite por minuto: 429 RATE_LIMITED e o Gemini nem é chamado', async () => {
+    mockRpc({ out_status: 'rate_limited', out_reservation_id: null, out_remaining: 3 });
+    const res = await POST(makeRequest());
+    const body = await res.json();
+
+    expect(res.status).toBe(429);
+    expect(body.error).toBe('RATE_LIMITED');
+    expect(generateContent).not.toHaveBeenCalled();
+  });
+
+  it('rejeita foto de referência que não seja uma imagem em Data URL', async () => {
+    const req = new NextRequest('http://localhost/api/generate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(makeParams({ base64Images: { front: 'https://exemplo.com/foto.png' } })),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    expect(calls('reserve_credit')).toHaveLength(0);
   });
 });
 
 describe('POST /api/generate — modo simulado', () => {
-  it('só funciona com a flag explícita, não chama o Gemini e nunca debita', async () => {
+  it('só funciona com a flag explícita, não chama o Gemini e nunca mexe em créditos', async () => {
     vi.stubEnv('MOCK_GENERATION', 'true');
     vi.stubEnv('NODE_ENV', 'development');
     const res = await POST(makeRequest());
@@ -96,7 +152,7 @@ describe('POST /api/generate — modo simulado', () => {
     expect(body.mock).toBe(true);
     expect(body.url).toMatch(/^data:image\/svg\+xml;base64,/);
     expect(generateContent).not.toHaveBeenCalled();
-    expect(creditCalls()).toHaveLength(0);
+    expect(rpc).not.toHaveBeenCalled();
   });
 
   it('é ignorado em produção (segue para o Gemini real)', async () => {
@@ -107,5 +163,6 @@ describe('POST /api/generate — modo simulado', () => {
 
     expect(generateContent).toHaveBeenCalled();
     expect(res.status).toBe(504);
+    expect(calls('refund_reservation')).toHaveLength(1);
   });
 });

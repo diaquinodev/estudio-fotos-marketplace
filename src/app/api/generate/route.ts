@@ -1,18 +1,27 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient as createSupabaseServerClient } from '@/utils/supabase/server';
-import { createClient as createSupabaseAdminClient, SupabaseClient } from '@supabase/supabase-js';
 import { GoogleGenAI } from '@google/genai';
+import { createClient as createSupabaseServerClient } from '@/utils/supabase/server';
+import { getSupabaseAdmin } from '@/lib/supabase-admin';
+import { withCreditReservation } from '@/lib/credits';
+import {
+  GenerationError,
+  classifyGeminiError,
+  extractGeneratedImage,
+  parseImageDataUrl,
+} from '@/lib/generation';
 import { buildGeminiSystemPrompt } from '@/services/promptBuilder';
-import type { 
-  ModelIdentity, 
-  EnvironmentConfig, 
-  FabricSpec, 
-  GarmentSpec, 
-  StylingConfig, 
-  ImageQuantity, 
-  PresentationMode, 
-  KitConfig 
+import type {
+  ModelIdentity,
+  EnvironmentConfig,
+  FabricSpec,
+  GarmentSpec,
+  StylingConfig,
+  ImageQuantity,
+  PresentationMode,
+  KitConfig,
 } from '@/types';
+
+const GEMINI_MODEL = 'gemini-2.5-flash-image';
 
 export interface GenerateApiRequest {
   base64Images: {
@@ -32,6 +41,8 @@ export interface GenerateApiRequest {
   highFidelityJson?: string;
 }
 
+type ContentPart = { text: string } | { inlineData: { mimeType: string; data: string } };
+
 /**
  * Modo simulado, SOMENTE para desenvolvimento local: exige MOCK_GENERATION=true e NODE_ENV diferente de
  * "production". Nunca debita créditos e devolve um placeholder gerado localmente (sem imagens externas).
@@ -50,413 +61,146 @@ function buildMockPlaceholder(): string {
   return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
 }
 
-// Service role admin client to bypass RLS when performing atomic credit deductions
-const supabaseAdmin = createSupabaseAdminClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
-);
-
-/**
- * Executes a function with exponential backoff for transient Google API errors (429 Rate Limits, 503 Overloads).
- */
-async function executeWithRetry<T>(
-  fn: () => Promise<T>,
-  retries: number = 2,
-  baseDelayMs: number = 1200
-): Promise<T> {
-  for (let attempt = 0; attempt <= retries; attempt++) {
+/** Repete a chamada em erros transitórios do Gemini (429/503), com backoff exponencial. */
+async function executeWithRetry<T>(fn: () => Promise<T>, retries = 2, baseDelayMs = 1200): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
     try {
       return await fn();
     } catch (err: unknown) {
-      const isLastAttempt = attempt === retries;
-      const status = (err as { status?: number })?.status;
-      const errMsg = err instanceof Error ? err.message : String(err);
-      const isTransient = status === 429 || status === 503 || errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED');
-
-      if (!isTransient || isLastAttempt) {
-        throw err;
-      }
-
-      const delay = baseDelayMs * Math.pow(2, attempt);
-      console.warn(`[Gemini API Retry] Tentativa ${attempt + 1} falhou com status ${status || errMsg}. Aguardando ${delay}ms...`);
-      await new Promise((res) => setTimeout(res, delay));
+      const status = (err as { status?: number } | null)?.status;
+      const message = err instanceof Error ? err.message : String(err);
+      const isTransient = status === 429 || status === 503 || message.includes('429') || message.includes('RESOURCE_EXHAUSTED');
+      if (!isTransient || attempt >= retries) throw err;
+      await new Promise((resolve) => setTimeout(resolve, baseDelayMs * 2 ** attempt));
     }
   }
-  throw new Error('Limite de tentativas excedido.');
 }
 
-/**
- * Extracts raw base64 data and mimeType from a standard Data URL.
- */
-function extractMimeAndData(dataUrl: string): { mimeType: string; data: string } | null {
-  if (!dataUrl || typeof dataUrl !== 'string') return null;
-  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
-  if (!match) return null;
-  return {
-    mimeType: match[1],
-    data: match[2],
-  };
-}
+function buildParts(body: GenerateApiRequest, promptText: string): ContentPart[] {
+  const parts: ContentPart[] = [{ text: promptText }];
 
-/**
- * Atomically deducts 1 credit for a user.
- * 
- * PostgreSQL RPC definition required in Supabase:
- * 
- * CREATE OR REPLACE FUNCTION decrement_credit(user_id UUID)
- * RETURNS INT
- * LANGUAGE plpgsql
- * SECURITY DEFINER
- * AS $$
- * DECLARE
- *   new_credits INT;
- * BEGIN
- *   UPDATE profiles
- *   SET credits = credits - 1
- *   WHERE id = user_id AND credits > 0
- *   RETURNING credits INTO new_credits;
- * 
- *   RETURN new_credits;
- * END;
- * $$;
- */
-async function deductCreditAtomically(
-  adminClient: SupabaseClient,
-  userId: string,
-  userClient?: SupabaseClient
-): Promise<{ success: boolean; remainingCredits: number }> {
-  const clientToUse = adminClient;
-  // 1. Primary path: Atomic RPC function with row-level transaction
-  try {
-    const { data: rpcCredits, error: rpcError } = await clientToUse.rpc('decrement_credit', {
-      user_id: userId,
-    });
-
-    if (!rpcError && typeof rpcCredits === 'number') {
-      return { success: true, remainingCredits: rpcCredits };
-    }
-    if (rpcError && userClient) {
-      const { data: userRpcCredits, error: userRpcError } = await userClient.rpc('decrement_credit', {
-        user_id: userId,
-      });
-      if (!userRpcError && typeof userRpcCredits === 'number') {
-        return { success: true, remainingCredits: userRpcCredits };
-      }
-    }
-  } catch (rpcErr) {
-    console.warn('Exceção ao chamar RPC decrement_credit:', rpcErr);
+  for (const dataUrl of [body.base64Images.front, body.base64Images.back]) {
+    const parsed = dataUrl ? parseImageDataUrl(dataUrl) : null;
+    if (parsed) parts.push({ inlineData: parsed });
   }
 
-  // 2. Safe defensive fallback: Single atomic conditional update
-  try {
-    let currentCredits = 0;
-    const { data: currentProfile } = await clientToUse
-      .from('profiles')
-      .select('credits')
-      .eq('id', userId)
-      .maybeSingle();
-
-    if (currentProfile?.credits !== undefined) {
-      currentCredits = currentProfile.credits;
-    } else if (userClient) {
-      const { data: userProfile } = await userClient
-        .from('profiles')
-        .select('credits')
-        .eq('id', userId)
-        .maybeSingle();
-      currentCredits = userProfile?.credits ?? 0;
+  if (body.presentationMode === 'kit' && body.kitConfig?.variations) {
+    for (const variation of body.kitConfig.variations.slice(0, body.kitConfig.quantity || 2)) {
+      const parsed = variation.url ? parseImageDataUrl(variation.url) : null;
+      if (parsed) parts.push({ inlineData: parsed });
     }
-
-    if (currentCredits <= 0) {
-      return { success: false, remainingCredits: 0 };
-    }
-
-    const { data: updated, error: updateError } = await clientToUse
-      .from('profiles')
-      .update({ credits: currentCredits - 1 })
-      .eq('id', userId)
-      .gt('credits', 0)
-      .select('credits')
-      .maybeSingle();
-
-    if (updated) {
-      return { success: true, remainingCredits: updated.credits };
-    }
-
-    if (userClient) {
-      const { data: userUpdated } = await userClient
-        .from('profiles')
-        .update({ credits: currentCredits - 1 })
-        .eq('id', userId)
-        .gt('credits', 0)
-        .select('credits')
-        .maybeSingle();
-      if (userUpdated) {
-        return { success: true, remainingCredits: userUpdated.credits };
-      }
-    }
-
-    return { success: false, remainingCredits: Math.max(0, currentCredits - 1) };
-  } catch (fallbackErr) {
-    console.error('Erro crítico no fallback de desconto de crédito:', fallbackErr);
-    return { success: false, remainingCredits: 0 };
   }
+  return parts;
 }
 
 export async function POST(req: NextRequest) {
-  console.log('>>> [/api/generate] HIT! Headers & Method:', req.method);
-  console.log('>>> [/api/generate] MOCK_GENERATION flag:', isMockEnabled());
   try {
+    // 1. Autenticação
     const serverSupabase = await createSupabaseServerClient();
-
-    // 1. Autenticação do Usuário
-    const { data: { user }, error: authError } = await serverSupabase.auth.getUser();
-    console.log('>>> [/api/generate] Authenticated User ID:', user?.id, 'Auth Error:', authError?.message);
+    const {
+      data: { user },
+      error: authError,
+    } = await serverSupabase.auth.getUser();
 
     if (authError || !user) {
       return NextResponse.json({ error: 'Sessão não autorizada ou expirada. Faça login novamente.' }, { status: 401 });
     }
 
-    // 2. Verificação Prévia de Saldo de Créditos
-    // Tenta primeiro com supabaseAdmin, e com serverSupabase como fallback de RLS
-    let profileData: { credits: number } | null = null;
-
-    const { data: adminProfile, error: adminProfileError } = await supabaseAdmin
-      .from('profiles')
-      .select('credits')
-      .eq('id', user.id)
-      .maybeSingle();
-
-    console.log('>>> [/api/generate] supabaseAdmin Profile Query:', { adminProfile, adminProfileError });
-
-    if (adminProfile) {
-      profileData = adminProfile;
-    } else {
-      // Fallback para o cliente com sessão do usuário (satisfaz políticas RLS de auth.uid() = id)
-      const { data: userProfile, error: userProfileError } = await serverSupabase
-        .from('profiles')
-        .select('credits')
-        .eq('id', user.id)
-        .maybeSingle();
-
-      console.log('>>> [/api/generate] serverSupabase Profile Query:', { userProfile, userProfileError });
-
-      if (userProfile) {
-        profileData = userProfile;
-      } else {
-        // Se o perfil ainda não existe no banco (novo usuário sem trigger), provisiona com saldo inicial de cortesia
-        console.log('>>> [/api/generate] Provisionando perfil para usuário:', user.id);
-        const { data: newProfile, error: insertError } = await serverSupabase
-          .from('profiles')
-          .upsert({ id: user.id, email: user.email, credits: 3 }, { onConflict: 'id' })
-          .select('credits')
-          .maybeSingle();
-
-        console.log('>>> [/api/generate] Perfil provisionado:', { newProfile, insertError });
-        profileData = newProfile || { credits: 3 };
-      }
+    // 2. Validação do payload
+    let body: GenerateApiRequest;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: 'Corpo da requisição inválido.' }, { status: 400 });
     }
 
-    const availableCredits = profileData?.credits ?? 0;
-    console.log('>>> [/api/generate] Saldo disponível apurado:', availableCredits);
-
-    if (availableCredits <= 0) {
-      return NextResponse.json({ 
-        error: 'INSUFFICIENT_CREDITS', 
-        message: 'Você não possui créditos suficientes. Solicite mais créditos ao administrador.' 
-      }, { status: 403 });
+    const front = body.base64Images?.front;
+    const back = body.base64Images?.back;
+    if (!front && !back) {
+      return NextResponse.json(
+        { error: 'É obrigatório fornecer ao menos uma foto de referência da peça (frente ou costas).' },
+        { status: 400 },
+      );
+    }
+    if ((front && !parseImageDataUrl(front)) || (back && !parseImageDataUrl(back))) {
+      return NextResponse.json({ error: 'Foto de referência inválida (use JPG, PNG ou WebP de até ~10 MB).' }, { status: 400 });
     }
 
-    // 3. Validação do Payload da Requisição
-    const body: GenerateApiRequest = await req.json();
-    const {
-      base64Images,
-      shotInstruction,
-      modelId,
-      env,
-      fabric,
-      garment,
-      styling,
-      quantity = 1,
-      presentationMode = 'model',
-      kitConfig,
-      additionalPrompt,
-      highFidelityJson,
-    } = body;
-
-    if (!base64Images?.front && !base64Images?.back) {
-      return NextResponse.json({ 
-        error: 'É obrigatório fornecer ao menos uma foto de referência da peça (frente ou costas).' 
-      }, { status: 400 });
-    }
-
-    // 4. Modo simulado (apenas desenvolvimento, flag explícita). Nunca debita créditos.
+    // 3. Modo simulado (apenas desenvolvimento, flag explícita). Não debita créditos.
     if (isMockEnabled()) {
       await new Promise((resolve) => setTimeout(resolve, 500));
-      return NextResponse.json({
-        success: true,
-        mock: true,
-        url: buildMockPlaceholder(),
-        imageUrl: buildMockPlaceholder(),
-        remainingCredits: availableCredits,
-      });
+      const placeholder = buildMockPlaceholder();
+      return NextResponse.json({ success: true, mock: true, url: placeholder, imageUrl: placeholder });
     }
 
-    // 5. Verificação de Chave de API do Gemini (quando fora do Mock Mode)
+    // 4. Chave do Gemini (somente servidor)
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      return NextResponse.json({ 
-        error: 'Configuração do servidor incompleta: GEMINI_API_KEY não configurada no ambiente.' 
-      }, { status: 500 });
+      return NextResponse.json({ error: 'Configuração do servidor incompleta: GEMINI_API_KEY não definida.' }, { status: 500 });
     }
 
-    // 5. Síntese do Prompt Estruturado de Alta Fidelidade (Autoridade do Servidor)
-    const promptText = buildGeminiSystemPrompt({
-      base64Images,
-      shotInstruction,
-      modelId,
-      env,
-      fabric,
-      garment,
-      styling,
-      quantity,
-      presentationMode,
-      kitConfig,
-      additionalPrompt,
-      highFidelityJson,
-    });
-
-    // 6. Montagem dos Parts Multimodais para o SDK @google/genai
-    type ContentPart = 
-      | { text: string }
-      | { inlineData: { mimeType: string; data: string } };
-
-    const parts: ContentPart[] = [{ text: promptText }];
-
-    // Adiciona imagem frontal como referência primária
-    if (base64Images.front) {
-      const parsed = extractMimeAndData(base64Images.front);
-      if (parsed) {
-        parts.push({ inlineData: parsed });
-      }
-    }
-
-    // Adiciona imagem traseira como referência de caimento/costas
-    if (base64Images.back) {
-      const parsed = extractMimeAndData(base64Images.back);
-      if (parsed) {
-        parts.push({ inlineData: parsed });
-      }
-    }
-
-    // Se estiver em modo kit, anexa amostras de cores fornecidas
-    if (presentationMode === 'kit' && kitConfig?.variations) {
-      const activeVariations = kitConfig.variations.slice(0, kitConfig.quantity || 2);
-      for (const variation of activeVariations) {
-        if (variation.url) {
-          const parsed = extractMimeAndData(variation.url);
-          if (parsed) {
-            parts.push({ inlineData: parsed });
-          }
-        }
-      }
-    }
-
-    // 7. Invocação do Modelo com Resiliência e Exponential Backoff
+    const promptText = buildGeminiSystemPrompt({ ...body, base64Images: body.base64Images, quantity: body.quantity ?? 1 });
+    const parts = buildParts(body, promptText);
     const ai = new GoogleGenAI({ apiKey });
+    const admin = getSupabaseAdmin();
 
-    let response: Awaited<ReturnType<typeof ai.models.generateContent>>;
-    try {
-      response = await executeWithRetry(async () => {
-        return await ai.models.generateContent({
-          model: 'gemini-2.5-flash-image',
-          contents: {
-            parts,
-          },
-          config: {
-            imageConfig: {
-              aspectRatio: '1:1',
-            },
-          },
-        });
-      }, 2, 1200);
-    } catch (geminiErr: unknown) {
-
-      // Qualquer falha do Gemini (inclusive cota 429) vira erro explícito: nada de imagem substituta nem débito.
-      throw geminiErr;
-    }
-
-    // 8. Extração Estrita do Base64 da Imagem Gerada
-    let generatedImageUrl: string | null = null;
-
-    const candidates = response.candidates;
-    if (candidates && candidates.length > 0) {
-      const firstCandidate = candidates[0];
-
-      // Verificação de bloqueio por filtros de moderação/segurança
-      if (firstCandidate.finishReason === 'SAFETY') {
-        return NextResponse.json({
-          error: 'A geração foi bloqueada pelas políticas de segurança de conteúdo da IA. Tente ajustar os detalhes da peça. Nenhum crédito foi descontado.'
-        }, { status: 422 });
-      }
-
-      const responseParts = firstCandidate.content?.parts;
-      if (responseParts) {
-        for (const part of responseParts) {
-          if (part.inlineData?.data) {
-            const mime = part.inlineData.mimeType || 'image/png';
-            generatedImageUrl = `data:${mime};base64,${part.inlineData.data}`;
-            break;
-          }
+    // 5. Reserva atômica do crédito ANTES de gerar; estorno automático se a geração falhar.
+    const result = await withCreditReservation(
+      admin,
+      user.id,
+      async () => {
+        let response;
+        try {
+          response = await executeWithRetry(() =>
+            ai.models.generateContent({
+              model: GEMINI_MODEL,
+              contents: { parts },
+              config: { imageConfig: { aspectRatio: '1:1' } },
+            }),
+          );
+        } catch (err) {
+          throw classifyGeminiError(err);
         }
+
+        const image = extractGeneratedImage(response);
+        if (image.kind === 'blocked') {
+          throw new GenerationError(422, 'A geração foi bloqueada pelas políticas de segurança da IA. Ajuste os detalhes da peça. O crédito foi devolvido.');
+        }
+        if (image.kind === 'empty') {
+          throw new GenerationError(502, 'O modelo respondeu, mas não retornou uma imagem. O crédito foi devolvido.');
+        }
+        return image.dataUrl;
+      },
+      { onRefundError: (err) => console.error('Falha ao liquidar reserva de crédito:', err instanceof Error ? err.message : err) },
+    );
+
+    if (!result.ok) {
+      if (result.reason === 'rate_limited') {
+        return NextResponse.json(
+          { error: 'RATE_LIMITED', message: 'Muitas gerações em pouco tempo. Aguarde um minuto e tente novamente.' },
+          { status: 429 },
+        );
       }
-    }
-
-    // Fallback de texto caso a resposta retorne diretamente a Data URL
-    if (!generatedImageUrl && response.text) {
-      const text = response.text.trim();
-      if (text.startsWith('data:image/')) {
-        generatedImageUrl = text;
+      if (result.reason === 'no_profile') {
+        return NextResponse.json({ error: 'Perfil não encontrado. Peça a um administrador para liberar o seu acesso.' }, { status: 403 });
       }
+      return NextResponse.json(
+        { error: 'INSUFFICIENT_CREDITS', message: 'Sua cota de créditos acabou. Solicite mais créditos ao administrador.' },
+        { status: 403 },
+      );
     }
-
-    // Se nenhuma imagem válida foi gerada, aborta sem cobrar créditos do usuário
-    if (!generatedImageUrl) {
-      console.error('Nenhum inlineData retornado na resposta do Gemini:', JSON.stringify(response).slice(0, 500));
-      return NextResponse.json({
-        error: 'O modelo processou a requisição, mas não retornou uma imagem compatível. Nenhum crédito foi descontado.'
-      }, { status: 502 });
-    }
-
-    // 9. Dedução Atômica de Crédito (Safe Commit On Delivery)
-    // Garantia de Perda Zero: O crédito só é descontado após a imagem ser validada
-    const deduction = await deductCreditAtomically(supabaseAdmin, user.id, serverSupabase);
 
     return NextResponse.json({
       success: true,
-      url: generatedImageUrl,
-      imageUrl: generatedImageUrl,
-      remainingCredits: deduction.remainingCredits,
+      url: result.value,
+      imageUrl: result.value,
+      remainingCredits: result.remaining,
     });
-
   } catch (error: unknown) {
-    console.error('Erro na rota /api/generate:', error);
-    const errMsg = error instanceof Error ? error.message : String(error);
-
-    let status = 500;
-    let userMessage = 'Ocorreu um erro ao processar a imagem no servidor. Nenhum crédito foi descontado.';
-
-    if (errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')) {
-      status = 429;
-      userMessage = 'O serviço de IA está com alta demanda no momento. Por favor, aguarde alguns segundos e tente novamente. Nenhum crédito foi descontado.';
-    } else if (errMsg.includes('SAFETY')) {
-      status = 422;
-      userMessage = 'Conteúdo bloqueado pelos filtros de segurança da IA. Nenhum crédito foi descontado.';
-    } else if (errMsg.includes('ETIMEDOUT') || errMsg.includes('fetch failed')) {
-      status = 504;
-      userMessage = 'Tempo limite esgotado ao contatar o serviço de IA. Nenhum crédito foi descontado.';
+    if (error instanceof GenerationError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
     }
-
-    return NextResponse.json({ error: userMessage }, { status });
+    console.error('Erro na rota /api/generate:', error instanceof Error ? error.message : 'erro desconhecido');
+    return NextResponse.json({ error: 'Ocorreu um erro ao processar a imagem no servidor. Nenhum crédito foi descontado.' }, { status: 500 });
   }
 }
