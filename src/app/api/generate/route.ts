@@ -3,6 +3,7 @@ import { GoogleGenAI } from '@google/genai';
 import { createClient as createSupabaseServerClient } from '@/utils/supabase/server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 import { withCreditReservation } from '@/lib/credits';
+import { persistGeneration } from '@/lib/persistence';
 import {
   GenerationError,
   classifyGeminiError,
@@ -125,17 +126,21 @@ export async function POST(req: NextRequest) {
 
     let promptText: string;
     let parts: ContentPart[];
+    let kind: 'generate' | 'edit' = 'generate';
+    let instruction: string | undefined;
 
     if (raw.mode === 'edit') {
       const target = parseImageDataUrl(raw.base64TargetImage);
       if (!target) {
         return NextResponse.json({ error: 'Imagem para retoque inválida (use JPG, PNG ou WebP de até ~10 MB).' }, { status: 400 });
       }
-      const instruction = typeof raw.editInstruction === 'string' ? raw.editInstruction.trim() : '';
-      if (!instruction || instruction.length > 1000) {
+      const editInstruction = typeof raw.editInstruction === 'string' ? raw.editInstruction.trim() : '';
+      if (!editInstruction || editInstruction.length > 1000) {
         return NextResponse.json({ error: 'Informe a instrução de retoque (até 1000 caracteres).' }, { status: 400 });
       }
-      promptText = buildEditPrompt(instruction, raw.additionalPrompt);
+      kind = 'edit';
+      instruction = editInstruction;
+      promptText = buildEditPrompt(editInstruction, raw.additionalPrompt);
       parts = [{ text: promptText }, { inlineData: target }];
     } else {
       const body = raw as GenerateApiRequest;
@@ -150,6 +155,7 @@ export async function POST(req: NextRequest) {
       if ((front && !parseImageDataUrl(front)) || (back && !parseImageDataUrl(back))) {
         return NextResponse.json({ error: 'Foto de referência inválida (use JPG, PNG ou WebP de até ~10 MB).' }, { status: 400 });
       }
+      instruction = body.shotInstruction;
       promptText = buildGeminiSystemPrompt({ ...body, quantity: body.quantity ?? 1 });
       parts = buildParts(body, promptText);
     }
@@ -195,7 +201,12 @@ export async function POST(req: NextRequest) {
         if (image.kind === 'empty') {
           throw new GenerationError(502, 'O modelo respondeu, mas não retornou uma imagem. O crédito foi devolvido.');
         }
-        return image.dataUrl;
+
+        // Persiste no Storage + tabela generations. Se falhar, a imagem ainda é entregue (o crédito foi
+        // consumido por uma geração válida) e o cliente é avisado com persisted:false.
+        const saved = await persistGeneration(admin, { userId: user.id, dataUrl: image.dataUrl, kind, instruction });
+        if (!saved.ok) console.error('Falha ao persistir a imagem gerada:', saved.error);
+        return { dataUrl: image.dataUrl, generationId: saved.ok ? saved.generationId : null };
       },
       { onRefundError: (err) => console.error('Falha ao liquidar reserva de crédito:', err instanceof Error ? err.message : err) },
     );
@@ -218,8 +229,10 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      url: result.value,
-      imageUrl: result.value,
+      url: result.value.dataUrl,
+      imageUrl: result.value.dataUrl,
+      generationId: result.value.generationId,
+      persisted: result.value.generationId !== null,
       remainingCredits: result.remaining,
     });
   } catch (error: unknown) {

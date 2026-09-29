@@ -3,7 +3,12 @@ import { NextRequest } from 'next/server';
 import { makeParams } from './fixtures';
 
 // --- Mocks -----------------------------------------------------------------
-const { rpc, generateContent } = vi.hoisted(() => ({ rpc: vi.fn(), generateContent: vi.fn() }));
+const { rpc, generateContent, upload, insertRow } = vi.hoisted(() => ({
+  rpc: vi.fn(),
+  generateContent: vi.fn(),
+  upload: vi.fn(),
+  insertRow: vi.fn(),
+}));
 
 vi.mock('@/utils/supabase/server', () => ({
   createClient: async () => ({
@@ -12,7 +17,16 @@ vi.mock('@/utils/supabase/server', () => ({
 }));
 
 vi.mock('@supabase/supabase-js', () => ({
-  createClient: () => ({ rpc }),
+  createClient: () => ({
+    rpc,
+    storage: { from: () => ({ upload, remove: vi.fn() }) },
+    from: () => ({
+      insert: (row: Record<string, unknown>) => {
+        insertRow(row);
+        return { select: () => ({ single: async () => ({ data: { id: row.id }, error: null }) }) };
+      },
+    }),
+  }),
 }));
 
 vi.mock('@google/genai', () => ({
@@ -53,6 +67,7 @@ beforeEach(() => {
   vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', 'http://localhost:54321');
   vi.stubEnv('SUPABASE_SERVICE_ROLE_KEY', 'service-role-de-teste');
   mockRpc();
+  upload.mockResolvedValue({ error: null });
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
 
@@ -78,6 +93,31 @@ describe('POST /api/generate — reserva antes, estorno em falha', () => {
     expect(body.url).toMatch(/^data:image\/png;base64,/);
     expect(body.remainingCredits).toBe(4);
     expect(order).toEqual(['reserve_credit', 'gemini', 'commit_reservation']);
+  });
+
+  it('sucesso: persiste a imagem no Storage e registra em generations', async () => {
+    generateContent.mockResolvedValue({ candidates: [{ content: { parts: [PNG] } }] });
+    const res = await POST(makeRequest());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.persisted).toBe(true);
+    expect(body.generationId).toEqual(expect.any(String));
+    expect(upload).toHaveBeenCalledWith(expect.stringMatching(/^user-1\/.+\.png$/), expect.any(Uint8Array), expect.objectContaining({ contentType: 'image/png' }));
+    expect(insertRow).toHaveBeenCalledWith(expect.objectContaining({ user_id: 'user-1', kind: 'generate' }));
+  });
+
+  it('falha ao persistir não perde a imagem nem cobra de novo: entrega com persisted=false', async () => {
+    upload.mockResolvedValue({ error: { message: 'bucket indisponível' } });
+    generateContent.mockResolvedValue({ candidates: [{ content: { parts: [PNG] } }] });
+    const res = await POST(makeRequest());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.persisted).toBe(false);
+    expect(body.url).toMatch(/^data:image\/png/);
+    expect(calls('commit_reservation')).toHaveLength(1);
+    expect(calls('refund_reservation')).toHaveLength(0);
   });
 
   it('erro 429 do Gemini: sem imagem substituta, com estorno', async () => {
