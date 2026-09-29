@@ -22,7 +22,7 @@ export async function GET(request: Request) {
       return NextResponse.redirect(`${redirectBase}${next}`)
     }
 
-    console.error('[AUTH DEBUG] Error exchanging code for session:', error.message, error)
+    console.error('Falha ao trocar o código OAuth por sessão (código: %s)', error.code ?? 'desconhecido')
     return NextResponse.redirect(`${redirectBase}/login?error=${encodeURIComponent(error.message)}`)
   }
 

@@ -18,7 +18,7 @@ export async function login(formData: FormData) {
   const { error } = await supabase.auth.signInWithPassword({ email, password })
 
   if (error) {
-    console.error('[AUTH DEBUG] Supabase Login Error:', error.message, error)
+    console.error('Falha no login (código: %s)', error.code ?? 'desconhecido')
     redirect(`/login?error=${encodeURIComponent(error.message)}`)
   }
 
@@ -39,7 +39,7 @@ export async function signup(formData: FormData) {
   const { data, error } = await supabase.auth.signUp({ email, password })
 
   if (error) {
-    console.error('[AUTH DEBUG] Supabase Signup Error:', error.message, error)
+    console.error('Falha no cadastro (código: %s)', error.code ?? 'desconhecido')
     redirect(`/login?error=${encodeURIComponent(error.message)}`)
   }
 
@@ -74,7 +74,7 @@ export async function signInWithGoogle() {
   })
 
   if (error) {
-    console.error('[AUTH DEBUG] Google Auth Error:', error.message, error)
+    console.error('Falha no login com Google (código: %s)', error.code ?? 'desconhecido')
     redirect(`/login?error=${encodeURIComponent(error.message)}`)
   }
 
