@@ -1,3 +1,13 @@
+/** Corpo (parcial) das respostas de /api/generate. */
+interface ServerResponse {
+  url?: string;
+  error?: string;
+  message?: string;
+  remainingCredits?: number;
+  persisted?: boolean;
+  mock?: boolean;
+}
+
 import { ImageGenerationStrategy, StrategyInfo, ImageGenerationParams, ImageEditParams } from './types';
 
 export class GeminiStrategy implements ImageGenerationStrategy {
@@ -26,9 +36,9 @@ export class GeminiStrategy implements ImageGenerationStrategy {
       body: JSON.stringify(params),
     });
 
-    let data: any = {};
+    let data: ServerResponse = {};
     try {
-      data = await response.json();
+      data = (await response.json()) as ServerResponse;
     } catch {
       // Fallback para respostas que não sejam JSON
     }
@@ -67,9 +77,9 @@ export class GeminiStrategy implements ImageGenerationStrategy {
       }),
     });
 
-    let data: any = {};
+    let data: ServerResponse = {};
     try {
-      data = await response.json();
+      data = (await response.json()) as ServerResponse;
     } catch {
       // Fallback para respostas que não sejam JSON
     }

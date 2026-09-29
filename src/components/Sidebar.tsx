@@ -2,7 +2,7 @@
 
 import React from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { LayoutGrid, Image as ImageIcon, Settings, LogOut, Sparkles } from 'lucide-react';
 import { createClient } from '@/utils/supabase/client';
 import { APP_NAME } from '@/config/brand';
@@ -15,11 +15,13 @@ const NAV_ITEMS = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const router = useRouter();
   const supabase = createClient();
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
-    window.location.href = '/login';
+    router.replace('/login');
+    router.refresh();
   };
 
   return (

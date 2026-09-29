@@ -12,7 +12,8 @@ interface Step1UploadPhotosProps {
   onFileUpload: (side: 'front' | 'back' | number) => (event: React.ChangeEvent<HTMLInputElement>) => void;
   frontInputRef: React.RefObject<HTMLInputElement | null>;
   backInputRef: React.RefObject<HTMLInputElement | null>;
-  variationInputRefs: React.MutableRefObject<(HTMLInputElement | null)[]>;
+  registerVariationInput: (idx: number, el: HTMLInputElement | null) => void;
+  openVariationPicker: (idx: number) => void;
   onAdvanceToStep2: () => void;
   onOpenTipsModal: () => void;
 }
@@ -27,7 +28,8 @@ export function Step1UploadPhotos({
   onFileUpload,
   frontInputRef,
   backInputRef,
-  variationInputRefs,
+  registerVariationInput,
+  openVariationPicker,
   onAdvanceToStep2,
   onOpenTipsModal,
 }: Step1UploadPhotosProps) {
@@ -254,7 +256,7 @@ export function Step1UploadPhotos({
                     <div
                       onClick={() => {
                         if (!isSlotProcessing) {
-                          variationInputRefs.current[idx]?.click();
+                          openVariationPicker(idx);
                         }
                       }}
                       className={`aspect-square border border-dashed rounded-xl flex flex-col items-center justify-center p-2 text-center transition-all relative overflow-hidden ${
@@ -284,7 +286,7 @@ export function Step1UploadPhotos({
                     <input
                       type="file"
                       ref={(el) => {
-                        variationInputRefs.current[idx] = el;
+                        registerVariationInput(idx, el);
                       }}
                       accept="image/jpeg, image/png, image/webp"
                       onChange={onFileUpload(idx)}

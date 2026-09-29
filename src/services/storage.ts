@@ -1,3 +1,24 @@
+import type { GenerationStep, GeneratedImage, ModelIdentity, EnvironmentConfig, FabricSpec, GarmentSpec, StylingConfig, ImageQuantity, PresentationMode, KitConfig, WizardStep } from '@/types';
+
+/** Estado do estúdio persistido no IndexedDB (todos os campos são opcionais: sessões antigas podem estar incompletas). */
+export interface StudioSessionState {
+  step?: GenerationStep;
+  wizardStep?: WizardStep;
+  presentationMode?: PresentationMode;
+  referenceImages?: { front: string | null; back: string | null };
+  generatedImages?: GeneratedImage[];
+  imageQuantity?: ImageQuantity;
+  isValidationCompleted?: boolean;
+  modelConfig?: ModelIdentity;
+  fabricConfig?: FabricSpec;
+  garmentConfig?: GarmentSpec;
+  stylingConfig?: StylingConfig;
+  envConfig?: EnvironmentConfig;
+  additionalPrompt?: string;
+  highFidelityJson?: string;
+  kitConfig?: KitConfig;
+}
+
 const DB_NAME = 'EstudioFotosDB';
 const STORE_NAME = 'appState';
 const DB_VERSION = 1;
@@ -46,7 +67,7 @@ export const initDB = (): Promise<IDBDatabase> => {
   return dbPromise;
 };
 
-export const saveState = async (state: any) => {
+export const saveState = async (state: StudioSessionState) => {
   try {
     const db = await initDB();
     return new Promise<void>((resolve, reject) => {
@@ -62,10 +83,10 @@ export const saveState = async (state: any) => {
   }
 };
 
-export const loadState = async (): Promise<any> => {
+export const loadState = async (): Promise<StudioSessionState | null | undefined> => {
   try {
     const db = await initDB();
-    return new Promise((resolve, reject) => {
+    return new Promise<StudioSessionState | undefined>((resolve, reject) => {
       const transaction = db.transaction(STORE_NAME, 'readonly');
       const store = transaction.objectStore(STORE_NAME);
       const request = store.get('currentSession');

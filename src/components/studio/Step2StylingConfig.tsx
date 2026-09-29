@@ -8,7 +8,6 @@ import type {
   EnvironmentConfig, 
   FabricSpec, 
   GarmentSpec, 
-  StylingConfig, 
   ImageQuantity, 
   PresentationMode 
 } from '@/types';
@@ -22,8 +21,6 @@ interface Step2StylingConfigProps {
   onSetFabricConfig: React.Dispatch<React.SetStateAction<FabricSpec>>;
   garmentConfig: GarmentSpec;
   onSetGarmentConfig: React.Dispatch<React.SetStateAction<GarmentSpec>>;
-  stylingConfig: StylingConfig;
-  onSetStylingConfig: React.Dispatch<React.SetStateAction<StylingConfig>>;
   envConfig: EnvironmentConfig;
   onSetEnvConfig: React.Dispatch<React.SetStateAction<EnvironmentConfig>>;
   imageQuantity: ImageQuantity;
@@ -132,8 +129,6 @@ export function Step2StylingConfig({
   onSetFabricConfig,
   garmentConfig,
   onSetGarmentConfig,
-  stylingConfig,
-  onSetStylingConfig,
   envConfig,
   onSetEnvConfig,
   imageQuantity,

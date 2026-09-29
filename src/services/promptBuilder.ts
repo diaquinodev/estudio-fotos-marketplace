@@ -175,7 +175,7 @@ export const buildDiffusionPrompt = (params: ImageGenerationParams): string => {
  * Builds an image edit / inpainting prompt
  */
 export const buildDiffusionEditPrompt = (params: ImageEditParams): string => {
-  const { editInstruction, base64TargetImage, additionalPrompt } = params;
+  const { editInstruction, additionalPrompt } = params;
   return [
     `High-precision photo retouching and seamless modification instruction: "${editInstruction}".`,
     `Keep 95% of original image unchanged, preserve exact identity, body proportions, clothing texture, lighting consistency and background colors.`,
@@ -198,7 +198,6 @@ export const buildGeminiSystemPrompt = (
     fabric,
     garment,
     styling,
-    quantity,
     presentationMode = 'model',
     kitConfig,
     additionalPrompt,

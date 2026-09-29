@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { AlertCircle } from 'lucide-react';
 import { generateProfessionalImage, editImage } from '@/services/geminiService';
 import { saveState, loadState, deleteDB } from '@/services/storage';
@@ -81,25 +81,23 @@ export default function App() {
   const [userCredits, setUserCredits] = useState<number | null>(null);
   const [processingSlots, setProcessingSlots] = useState<Record<string, boolean>>({});
   
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
-  useEffect(() => {
-    const fetchCreditsAndProfile = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('credits')
-          .eq('id', user.id)
-          .maybeSingle();
-
-        setUserCredits(profile?.credits ?? 0);
-
-      }
-    };
-    fetchCreditsAndProfile();
+  const refreshCredits = useCallback(async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('credits')
+      .eq('id', user.id)
+      .maybeSingle();
+    setUserCredits(profile?.credits ?? 0);
   }, [supabase]);
 
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- carga inicial do saldo
+    void refreshCredits();
+  }, [refreshCredits]);
 
   const [modelConfig, setModelConfig] = useState<ModelIdentity>({
     ageRange: '24',
@@ -162,27 +160,61 @@ export default function App() {
   const frontInputRef = useRef<HTMLInputElement>(null);
   const backInputRef = useRef<HTMLInputElement>(null);
   const variationInputRefs = useRef<(HTMLInputElement | null)[]>([]);
+  const registerVariationInput = useCallback((idx: number, el: HTMLInputElement | null) => {
+    variationInputRefs.current[idx] = el;
+  }, []);
+  const openVariationPicker = useCallback((idx: number) => {
+    variationInputRefs.current[idx]?.click();
+  }, []);
+
+  const restoreSession = async () => {
+    try {
+      const savedState = await Promise.race([
+        loadState(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Timeout loading state")), 5000))
+      ]);
+
+      if (savedState) {
+        if (savedState.step) setStep(savedState.step);
+        if (savedState.wizardStep) setWizardStep(savedState.wizardStep);
+        if (savedState.presentationMode) setPresentationMode(savedState.presentationMode);
+        if (savedState.referenceImages) setReferenceImages(savedState.referenceImages);
+        
+        if (savedState.generatedImages) {
+          const fixedImages = savedState.generatedImages.map((img: GeneratedImage) => ({
+            ...img,
+            status: img.status === 'processing' ? 'failed' : img.status
+          }));
+          setGeneratedImages(fixedImages);
+        }
+        
+        if (savedState.imageQuantity) setImageQuantity(savedState.imageQuantity);
+        if (savedState.isValidationCompleted !== undefined) setIsValidationCompleted(savedState.isValidationCompleted);
+        if (savedState.modelConfig) setModelConfig(savedState.modelConfig);
+        if (savedState.fabricConfig) setFabricConfig(savedState.fabricConfig);
+        if (savedState.garmentConfig) setGarmentConfig(savedState.garmentConfig);
+        if (savedState.stylingConfig) setStylingConfig(savedState.stylingConfig);
+        if (savedState.envConfig) {
+          if (savedState.envConfig.category) {
+            setEnvConfig(savedState.envConfig);
+          } else {
+            setEnvConfig(ENV_PRESETS[0]);
+          }
+        }
+        if (savedState.additionalPrompt) setAdditionalPrompt(savedState.additionalPrompt);
+        if (savedState.highFidelityJson) setHighFidelityJson(savedState.highFidelityJson);
+        if (savedState.kitConfig) setKitConfig(savedState.kitConfig);
+      }
+    } catch (e) {
+      console.error("Falha ao restaurar sessão:", e);
+    } finally {
+      setIsRestoring(false);
+    }
+  };
 
   useEffect(() => {
-    const init = async () => {
-      if (localStorage.getItem('FORCE_RESET')) {
-        setIsRestoring(true);
-        try {
-          await deleteDB();
-          localStorage.clear();
-          sessionStorage.clear();
-          localStorage.removeItem('FORCE_RESET');
-          window.history.replaceState({}, document.title, window.location.pathname);
-        } catch (e) {
-          console.error("Erro durante reset forçado:", e);
-        } finally {
-          setIsRestoring(false);
-        }
-      } else {
-        restoreSession();
-      }
-    };
-    init();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- restaura a sessão salva no IndexedDB ao montar
+    void restoreSession();
   }, []);
 
   // Auto-save effect with debounce
@@ -229,51 +261,6 @@ export default function App() {
     highFidelityJson,
     kitConfig
   ]);
-
-  const restoreSession = async () => {
-    try {
-      const savedState = await Promise.race([
-        loadState(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout loading state")), 5000))
-      ]);
-
-      if (savedState) {
-        if (savedState.step) setStep(savedState.step);
-        if (savedState.wizardStep) setWizardStep(savedState.wizardStep);
-        if (savedState.presentationMode) setPresentationMode(savedState.presentationMode);
-        if (savedState.referenceImages) setReferenceImages(savedState.referenceImages);
-        
-        if (savedState.generatedImages) {
-          const fixedImages = savedState.generatedImages.map((img: GeneratedImage) => ({
-            ...img,
-            status: img.status === 'processing' ? 'failed' : img.status
-          }));
-          setGeneratedImages(fixedImages);
-        }
-        
-        if (savedState.imageQuantity) setImageQuantity(savedState.imageQuantity);
-        if (savedState.isValidationCompleted !== undefined) setIsValidationCompleted(savedState.isValidationCompleted);
-        if (savedState.modelConfig) setModelConfig(savedState.modelConfig);
-        if (savedState.fabricConfig) setFabricConfig(savedState.fabricConfig);
-        if (savedState.garmentConfig) setGarmentConfig(savedState.garmentConfig);
-        if (savedState.stylingConfig) setStylingConfig(savedState.stylingConfig);
-        if (savedState.envConfig) {
-          if (savedState.envConfig.category) {
-            setEnvConfig(savedState.envConfig);
-          } else {
-            setEnvConfig(ENV_PRESETS[0]);
-          }
-        }
-        if (savedState.additionalPrompt) setAdditionalPrompt(savedState.additionalPrompt);
-        if (savedState.highFidelityJson) setHighFidelityJson(savedState.highFidelityJson);
-        if (savedState.kitConfig) setKitConfig(savedState.kitConfig);
-      }
-    } catch (e) {
-      console.error("Falha ao restaurar sessão:", e);
-    } finally {
-      setIsRestoring(false);
-    }
-  };
 
   const confirmResetSession = async () => {
     setShowResetModal(false);
@@ -381,11 +368,7 @@ export default function App() {
       setGeneratedImages(placeholders);
     }
 
-    let isAborted = false;
-
     const executeShot = async (shot: typeof SHOT_TYPES[0], index: number) => {
-       if (isAborted) return;
-
        const globalIndex = startIndex + index;
        let instruction = presentationMode === 'still' ? shot.stillInstruction : shot.instruction;
 
@@ -413,7 +396,7 @@ export default function App() {
           (statusMsg) => setProgressStatus(`[${shot.label}] ${statusMsg}`)
         );
 
-        if (resultUrl && !isAborted) {
+        if (resultUrl) {
           setGeneratedImages(prev => {
             const next = [...prev];
             if (next[globalIndex]) {
@@ -421,10 +404,7 @@ export default function App() {
             }
             return next;
           });
-          if (userCredits !== null) {
-            setUserCredits(prev => (prev !== null ? Math.max(0, prev - 1) : null));
-          }
-        } else if (!resultUrl && !isAborted) {
+        } else {
           setGeneratedImages(prev => {
             const next = [...prev];
             if (next[globalIndex]) {
@@ -434,8 +414,7 @@ export default function App() {
           });
         }
        } catch (err: unknown) {
-        if (isAborted) return;
-        setGeneratedImages(prev => {
+         setGeneratedImages(prev => {
           const next = [...prev];
           if (next[globalIndex]) {
             next[globalIndex] = { ...next[globalIndex], status: 'failed' };
@@ -455,8 +434,9 @@ export default function App() {
       img.status === 'processing' ? { ...img, status: 'failed' } : img
     ));
 
-    if (targetQty < 10 && !isAborted) setIsValidationCompleted(true);
+    if (targetQty < 10) setIsValidationCompleted(true);
     setProgressStatus('');
+    void refreshCredits();
     setStep(GenerationStep.COMPLETED);
   };
 
@@ -506,6 +486,7 @@ export default function App() {
        setError(msg);
     } finally {
       setProgressStatus('');
+      void refreshCredits();
     }
   };
 
@@ -561,6 +542,7 @@ export default function App() {
       setError(msg);
     } finally {
       setProgressStatus('');
+      void refreshCredits();
     }
   };
 
@@ -627,7 +609,8 @@ export default function App() {
               onFileUpload={handleFileUpload}
               frontInputRef={frontInputRef}
               backInputRef={backInputRef}
-              variationInputRefs={variationInputRefs}
+              registerVariationInput={registerVariationInput}
+              openVariationPicker={openVariationPicker}
               onAdvanceToStep2={() => setWizardStep(2)}
               onOpenTipsModal={() => setIsTipsModalOpen(true)}
             />
@@ -644,8 +627,6 @@ export default function App() {
               onSetFabricConfig={setFabricConfig}
               garmentConfig={garmentConfig}
               onSetGarmentConfig={setGarmentConfig}
-              stylingConfig={stylingConfig}
-              onSetStylingConfig={setStylingConfig}
               envConfig={envConfig}
               onSetEnvConfig={setEnvConfig}
               imageQuantity={imageQuantity}
