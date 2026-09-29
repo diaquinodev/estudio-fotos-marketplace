@@ -400,3 +400,18 @@ ${highFidelityReinforcement}
 ${technicalSpecs}
   `.trim();
 };
+
+/**
+ * Prompt de retoque: recebe apenas a instrução do usuário (a imagem alvo segue como anexo).
+ * Mantém o restante da imagem intacto (protocolo de congelamento).
+ */
+export const buildEditPrompt = (editInstruction: string, additionalPrompt?: string): string =>
+  `
+TASK: HIGH-PRECISION IMAGE EDITING (INPAINTING).
+ROLE: SENIOR PHOTO RETOUCHER.
+USER INSTRUCTION: "${editInstruction.toUpperCase()}"
+1. FREEZE PROTOCOL: 95% of the image MUST remain PIXEL-PERFECT identical to the input image.
+2. TARGET ONLY: Modify ONLY the specific element mentioned. Keep the garment design, color, texture, the model identity and the background unchanged.
+${additionalPrompt ? `ADDITIONAL CONTEXT: "${additionalPrompt.toUpperCase()}"` : ''}
+Output a single photorealistic image with the same 1:1 framing.
+`.trim();

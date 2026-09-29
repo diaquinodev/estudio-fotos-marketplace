@@ -9,7 +9,7 @@ import {
   extractGeneratedImage,
   parseImageDataUrl,
 } from '@/lib/generation';
-import { buildGeminiSystemPrompt } from '@/services/promptBuilder';
+import { buildEditPrompt, buildGeminiSystemPrompt } from '@/services/promptBuilder';
 import type {
   ModelIdentity,
   EnvironmentConfig,
@@ -23,7 +23,16 @@ import type {
 
 const GEMINI_MODEL = 'gemini-2.5-flash-image';
 
+/** Retoque de uma imagem já gerada (o cliente envia mode: 'edit'). */
+export interface EditApiRequest {
+  mode: 'edit';
+  base64TargetImage: string;
+  editInstruction: string;
+  additionalPrompt?: string;
+}
+
 export interface GenerateApiRequest {
+  mode?: 'generate';
   base64Images: {
     front?: string;
     back?: string;
@@ -107,23 +116,42 @@ export async function POST(req: NextRequest) {
     }
 
     // 2. Validação do payload
-    let body: GenerateApiRequest;
+    let raw: GenerateApiRequest | EditApiRequest;
     try {
-      body = await req.json();
+      raw = await req.json();
     } catch {
       return NextResponse.json({ error: 'Corpo da requisição inválido.' }, { status: 400 });
     }
 
-    const front = body.base64Images?.front;
-    const back = body.base64Images?.back;
-    if (!front && !back) {
-      return NextResponse.json(
-        { error: 'É obrigatório fornecer ao menos uma foto de referência da peça (frente ou costas).' },
-        { status: 400 },
-      );
-    }
-    if ((front && !parseImageDataUrl(front)) || (back && !parseImageDataUrl(back))) {
-      return NextResponse.json({ error: 'Foto de referência inválida (use JPG, PNG ou WebP de até ~10 MB).' }, { status: 400 });
+    let promptText: string;
+    let parts: ContentPart[];
+
+    if (raw.mode === 'edit') {
+      const target = parseImageDataUrl(raw.base64TargetImage);
+      if (!target) {
+        return NextResponse.json({ error: 'Imagem para retoque inválida (use JPG, PNG ou WebP de até ~10 MB).' }, { status: 400 });
+      }
+      const instruction = typeof raw.editInstruction === 'string' ? raw.editInstruction.trim() : '';
+      if (!instruction || instruction.length > 1000) {
+        return NextResponse.json({ error: 'Informe a instrução de retoque (até 1000 caracteres).' }, { status: 400 });
+      }
+      promptText = buildEditPrompt(instruction, raw.additionalPrompt);
+      parts = [{ text: promptText }, { inlineData: target }];
+    } else {
+      const body = raw as GenerateApiRequest;
+      const front = body.base64Images?.front;
+      const back = body.base64Images?.back;
+      if (!front && !back) {
+        return NextResponse.json(
+          { error: 'É obrigatório fornecer ao menos uma foto de referência da peça (frente ou costas).' },
+          { status: 400 },
+        );
+      }
+      if ((front && !parseImageDataUrl(front)) || (back && !parseImageDataUrl(back))) {
+        return NextResponse.json({ error: 'Foto de referência inválida (use JPG, PNG ou WebP de até ~10 MB).' }, { status: 400 });
+      }
+      promptText = buildGeminiSystemPrompt({ ...body, quantity: body.quantity ?? 1 });
+      parts = buildParts(body, promptText);
     }
 
     // 3. Modo simulado (apenas desenvolvimento, flag explícita). Não debita créditos.
@@ -139,8 +167,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Configuração do servidor incompleta: GEMINI_API_KEY não definida.' }, { status: 500 });
     }
 
-    const promptText = buildGeminiSystemPrompt({ ...body, base64Images: body.base64Images, quantity: body.quantity ?? 1 });
-    const parts = buildParts(body, promptText);
     const ai = new GoogleGenAI({ apiKey });
     const admin = getSupabaseAdmin();
 

@@ -141,6 +141,34 @@ describe('POST /api/generate — reserva antes, estorno em falha', () => {
   });
 });
 
+describe('POST /api/generate — retoque', () => {
+  const editRequest = (body: unknown) =>
+    new NextRequest('http://localhost/api/generate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  it('aceita mode=edit com a imagem alvo e a instrução, reserva e confirma o crédito', async () => {
+    generateContent.mockResolvedValue({ candidates: [{ content: { parts: [PNG] } }] });
+    const res = await POST(editRequest({ mode: 'edit', base64TargetImage: 'data:image/png;base64,iVBORw0KGgo=', editInstruction: 'remover a bolsa' }));
+
+    expect(res.status).toBe(200);
+    const sent = generateContent.mock.calls[0][0].contents.parts;
+    expect(sent[0].text).toContain('REMOVER A BOLSA');
+    expect(sent[1].inlineData.mimeType).toBe('image/png');
+    expect(calls('commit_reservation')).toHaveLength(1);
+  });
+
+  it('rejeita retoque sem instrução ou com imagem inválida, sem reservar crédito', async () => {
+    const semInstrucao = await POST(editRequest({ mode: 'edit', base64TargetImage: 'data:image/png;base64,iVBORw0KGgo=', editInstruction: '  ' }));
+    const semImagem = await POST(editRequest({ mode: 'edit', base64TargetImage: 'nao-e-imagem', editInstruction: 'x' }));
+    expect(semInstrucao.status).toBe(400);
+    expect(semImagem.status).toBe(400);
+    expect(calls('reserve_credit')).toHaveLength(0);
+  });
+});
+
 describe('POST /api/generate — modo simulado', () => {
   it('só funciona com a flag explícita, não chama o Gemini e nunca mexe em créditos', async () => {
     vi.stubEnv('MOCK_GENERATION', 'true');

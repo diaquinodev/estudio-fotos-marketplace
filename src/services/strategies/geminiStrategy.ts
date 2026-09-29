@@ -59,7 +59,12 @@ export class GeminiStrategy implements ImageGenerationStrategy {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify(params),
+      body: JSON.stringify({
+        mode: 'edit',
+        base64TargetImage: params.base64TargetImage,
+        editInstruction: params.editInstruction,
+        additionalPrompt: params.additionalPrompt,
+      }),
     });
 
     let data: any = {};
