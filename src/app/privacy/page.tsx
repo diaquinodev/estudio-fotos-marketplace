@@ -52,7 +52,7 @@ export default function PrivacyPage() {
             <h2 className="text-base font-bold text-slate-900">Operadores</h2>
             <ul className="list-disc pl-5 space-y-1">
               <li><strong>Supabase:</strong> autenticação, banco de dados e armazenamento das imagens.</li>
-              <li><strong>Google (Gemini API):</strong> recebe as fotos de referência e o prompt para gerar as imagens.</li>
+              <li><strong>OpenRouter:</strong> recebe as fotos de referência e o prompt para encaminhar a geração pelo modelo configurado.</li>
             </ul>
           </section>
 

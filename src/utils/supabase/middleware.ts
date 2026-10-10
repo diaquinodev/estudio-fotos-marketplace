@@ -37,7 +37,9 @@ export async function updateSession(request: NextRequest) {
     request.nextUrl.pathname.startsWith(path)
   )
 
-  if (!user && !isPublicRoute) {
+  const isMockMode = process.env.MOCK_GENERATION?.trim() === 'true' && process.env.NODE_ENV !== 'production'
+
+  if (!user && !isPublicRoute && !isMockMode) {
     // Visitante não autenticado tentando acessar rota privada -> redireciona para login
     const url = request.nextUrl.clone()
     url.pathname = '/login'

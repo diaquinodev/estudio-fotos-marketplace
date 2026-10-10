@@ -57,17 +57,21 @@ export function extractGeneratedImage(response: ResponseLike): ExtractedImage {
   return { kind: 'empty' };
 }
 
-/** Converte falhas do SDK do Gemini em status HTTP e mensagem para o usuário (o crédito já é estornado). */
-export function classifyGeminiError(err: unknown): GenerationError {
+/** Converte falhas do provedor de imagem em status HTTP e mensagem segura (o crédito já é estornado). */
+export function classifyImageProviderError(err: unknown): GenerationError {
   if (err instanceof GenerationError) return err;
   const message = err instanceof Error ? err.message : String(err);
   const errorName = err instanceof Error ? err.name : '';
   const status = (err as { status?: number } | null)?.status;
 
+  if (status === 402 || message.includes('402') || message.includes('Payment Required') || message.includes('insufficient_quota')) {
+    return new GenerationError(503, 'O serviço de geração está temporariamente indisponível. Tente novamente mais tarde. O crédito foi devolvido.');
+  }
+
   if (status === 429 || message.includes('429') || message.includes('RESOURCE_EXHAUSTED')) {
     return new GenerationError(429, 'O serviço de IA está com alta demanda no momento. Aguarde alguns segundos e tente novamente. O crédito foi devolvido.');
   }
-  if (message.includes('SAFETY')) {
+  if (status === 422 || message.includes('SAFETY') || message.includes('content_policy')) {
     return new GenerationError(422, 'Conteúdo bloqueado pelos filtros de segurança da IA. O crédito foi devolvido.');
   }
   if (errorName.includes('Timeout') || /ETIMEDOUT|timed out|timeout|fetch failed/i.test(message)) {

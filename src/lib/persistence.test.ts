@@ -52,10 +52,35 @@ describe('persistGeneration', () => {
     expect(insert).not.toHaveBeenCalled();
   });
 
-  it('falha no INSERT remove o arquivo enviado (sem órfãos)', async () => {
-    const { client, remove } = fakeClient({ insertError: 'rls' });
-    const r = await persistGeneration(client, { userId: 'u1', dataUrl: PNG, kind: 'generate' }, () => 'g2');
+  it('grava dados opcionais de telemetria (cost_usd, provider, model)', async () => {
+    const { client, insert } = fakeClient();
+    await persistGeneration(
+      client,
+      {
+        userId: 'u1',
+        dataUrl: PNG,
+        kind: 'generate',
+        costUsd: 0.05,
+        provider: 'openrouter',
+        model: 'openai/gpt-image-2.5-sunburst',
+      },
+      () => 'g3',
+    );
+    expect(insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cost_usd: 0.05,
+        provider: 'openrouter',
+        model: 'openai/gpt-image-2.5-sunburst',
+      }),
+    );
+  });
+
+  it('falha no INSERT com telemetria remove o arquivo sem ocultar o erro', async () => {
+    const { client, insert, remove } = fakeClient({ insertError: 'column "cost_usd" does not exist' });
+    const r = await persistGeneration(client, { userId: 'u1', dataUrl: PNG, kind: 'generate', costUsd: 0.05 }, () => 'g4');
+
     expect(r.ok).toBe(false);
-    expect(remove).toHaveBeenCalledWith(['u1/g2.png']);
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(remove).toHaveBeenCalledWith(['u1/g4.png']);
   });
 });

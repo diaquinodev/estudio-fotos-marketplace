@@ -46,6 +46,13 @@ d('migrações SQL (Postgres real)', () => {
     expect(await credits(bob)).toBe(3);
   });
 
+  it('aplica as colunas de telemetria em generations', async () => {
+    const columns = await q(
+      `select column_name from information_schema.columns where table_schema = 'public' and table_name = 'generations' order by column_name`,
+    );
+    expect(columns.map((column) => column.column_name)).toEqual(expect.arrayContaining(['cost_usd', 'provider', 'model']));
+  });
+
   it('reserve_credit debita antes e informa o saldo restante', async () => {
     const r = await reserve(alice);
     expect(r.out_status).toBe('ok');

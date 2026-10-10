@@ -29,6 +29,9 @@ export interface PersistInput {
   kind: 'generate' | 'edit';
   instruction?: string;
   prompt?: string;
+  costUsd?: number;
+  provider?: string;
+  model?: string;
 }
 
 export type PersistResult = { ok: true; generationId: string; storagePath: string } | { ok: false; error: string };
@@ -50,17 +53,22 @@ export async function persistGeneration(client: StorageClient, input: PersistInp
     const { error: uploadError } = await bucket.upload(path, bytes, { contentType: parsed.mimeType, upsert: false });
     if (uploadError) return { ok: false, error: `Upload falhou: ${uploadError.message}` };
 
+    const insertPayload: Record<string, unknown> = {
+      id,
+      user_id: input.userId,
+      kind: input.kind,
+      shot_type: input.kind === 'generate' ? inferShotType(input.instruction) : 'edit',
+      prompt: input.prompt ?? input.instruction ?? null,
+      storage_path: path,
+      mime_type: parsed.mimeType,
+      ...(input.costUsd !== undefined ? { cost_usd: input.costUsd } : {}),
+      ...(input.provider ? { provider: input.provider } : {}),
+      ...(input.model ? { model: input.model } : {}),
+    };
+
     const { data, error: insertError } = await client
       .from('generations')
-      .insert({
-        id,
-        user_id: input.userId,
-        kind: input.kind,
-        shot_type: input.kind === 'generate' ? inferShotType(input.instruction) : 'edit',
-        prompt: input.prompt ?? input.instruction ?? null,
-        storage_path: path,
-        mime_type: parsed.mimeType,
-      })
+      .insert(insertPayload)
       .select('id')
       .single();
 

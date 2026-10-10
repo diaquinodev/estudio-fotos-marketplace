@@ -6,6 +6,9 @@ interface ServerResponse {
   remainingCredits?: number;
   persisted?: boolean;
   mock?: boolean;
+  costUsd?: number;
+  provider?: string;
+  model?: string;
 }
 
 import { ImageGenerationStrategy, StrategyInfo, ImageGenerationParams, ImageEditParams } from './types';
