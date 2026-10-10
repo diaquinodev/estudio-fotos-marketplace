@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenAI } from '@google/genai';
+import {
+  describeProviderFailure,
+  getImageProviderConfig,
+  ImageProviderConfigError,
+  type ProviderGenerationResult,
+} from '@/config/image-generation';
 import { createClient as createSupabaseServerClient } from '@/utils/supabase/server';
 import { getSupabaseAdmin } from '@/lib/supabase-admin';
 import { withCreditReservation } from '@/lib/credits';
@@ -21,8 +27,6 @@ import type {
   PresentationMode,
   KitConfig,
 } from '@/types';
-
-const GEMINI_MODEL = 'gemini-2.5-flash-image';
 
 /** Retoque de uma imagem já gerada (o cliente envia mode: 'edit'). */
 export interface EditApiRequest {
@@ -168,12 +172,22 @@ export async function POST(req: NextRequest) {
     }
 
     // 4. Chave do Gemini (somente servidor)
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json({ error: 'Configuração do servidor incompleta: GEMINI_API_KEY não definida.' }, { status: 500 });
+    let providerConfig;
+    try {
+      providerConfig = getImageProviderConfig();
+    } catch (error) {
+      if (error instanceof ImageProviderConfigError) {
+        console.error('Configuração inválida do provedor de imagem:', { provider: 'gemini', code: error.code });
+        return NextResponse.json({ error: error.message }, { status: 500 });
+      }
+      throw error;
     }
 
-    const ai = new GoogleGenAI({ apiKey });
+    const providerResult: ProviderGenerationResult = {
+      provider: providerConfig.provider,
+      model: providerConfig.model,
+    };
+    const ai = new GoogleGenAI({ apiKey: providerConfig.apiKey });
     const admin = getSupabaseAdmin();
 
     // 5. Reserva atômica do crédito ANTES de gerar; estorno automático se a geração falhar.
@@ -185,12 +199,16 @@ export async function POST(req: NextRequest) {
         try {
           response = await executeWithRetry(() =>
             ai.models.generateContent({
-              model: GEMINI_MODEL,
+              model: providerConfig.model,
               contents: { parts },
-              config: { imageConfig: { aspectRatio: '1:1' } },
+              config: {
+                httpOptions: { timeout: providerConfig.timeoutMs },
+                imageConfig: { aspectRatio: providerConfig.aspectRatio },
+              },
             }),
           );
         } catch (err) {
+          console.error('Falha no provedor de imagem:', describeProviderFailure(err, providerConfig));
           throw classifyGeminiError(err);
         }
 
@@ -227,6 +245,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    console.info('Geração de imagem concluída:', {
+      provider: providerResult.provider,
+      model: providerResult.model,
+      persisted: result.value.generationId !== null,
+    });
+
     return NextResponse.json({
       success: true,
       url: result.value.dataUrl,
@@ -234,6 +258,8 @@ export async function POST(req: NextRequest) {
       generationId: result.value.generationId,
       persisted: result.value.generationId !== null,
       remainingCredits: result.remaining,
+      provider: providerResult.provider,
+      model: providerResult.model,
     });
   } catch (error: unknown) {
     if (error instanceof GenerationError) {
