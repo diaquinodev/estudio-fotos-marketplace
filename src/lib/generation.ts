@@ -61,6 +61,7 @@ export function extractGeneratedImage(response: ResponseLike): ExtractedImage {
 export function classifyGeminiError(err: unknown): GenerationError {
   if (err instanceof GenerationError) return err;
   const message = err instanceof Error ? err.message : String(err);
+  const errorName = err instanceof Error ? err.name : '';
   const status = (err as { status?: number } | null)?.status;
 
   if (status === 429 || message.includes('429') || message.includes('RESOURCE_EXHAUSTED')) {
@@ -69,7 +70,7 @@ export function classifyGeminiError(err: unknown): GenerationError {
   if (message.includes('SAFETY')) {
     return new GenerationError(422, 'Conteúdo bloqueado pelos filtros de segurança da IA. O crédito foi devolvido.');
   }
-  if (message.includes('ETIMEDOUT') || message.includes('fetch failed')) {
+  if (errorName.includes('Timeout') || /ETIMEDOUT|timed out|timeout|fetch failed/i.test(message)) {
     return new GenerationError(504, 'Tempo limite esgotado ao contatar o serviço de IA. O crédito foi devolvido.');
   }
   return new GenerationError(500, 'Ocorreu um erro ao gerar a imagem no servidor. O crédito foi devolvido.');

@@ -41,7 +41,7 @@ flowchart LR
 
   G -->|getUser via cookies SSR| SA
   G -->|1 reserve_credit<br/>débito atômico + limite/min| DB
-  G -->|2 prompt + imagens<br/>gemini-2.5-flash-image| GM[Google Gemini]
+  G -->|2 prompt + imagens<br/>gemini-3.1-flash-image| GM[Google Gemini]
   GM -->|imagem| G
   G -->|3a sucesso: grava arquivo| ST
   G -->|3a sucesso: registra generations<br/>e commit_reservation| DB
@@ -61,7 +61,7 @@ Fluxo de `/api/generate` (`src/app/api/generate/route.ts`):
 
 - Next.js 16 (App Router), React 19, TypeScript 5, Tailwind CSS 4, lucide-react
 - Supabase: Auth, Postgres (RLS + funções SQL) e Storage (`@supabase/ssr`, `@supabase/supabase-js`)
-- Google Gemini (`@google/genai`), modelo `gemini-2.5-flash-image`
+- Google Gemini (`@google/genai`), modelo padrão `gemini-3.1-flash-image`
 - Vitest (testes) e ESLint 9; GitHub Actions (CI)
 
 ## Estrutura
@@ -97,6 +97,8 @@ Somente nomes; os valores ficam fora do repositório (modelo em [`.env.example`]
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Chave pública (anon) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Somente servidor: reserva de créditos e gravação das imagens |
 | `GEMINI_API_KEY` | Somente servidor |
+| `GEMINI_IMAGE_MODEL` | Opcional. Modelo de imagem usado no servidor (padrão `gemini-3.1-flash-image`) |
+| `GEMINI_REQUEST_TIMEOUT_MS` | Opcional. Tempo máximo por chamada ao Gemini, entre 10 e 300 segundos (padrão 120 segundos) |
 | `RATE_LIMIT_PER_MINUTE` | Opcional. Gerações por usuário por minuto (padrão 20) |
 | `MOCK_GENERATION` | Opcional. `true` devolve um placeholder local sem chamar o Gemini e sem debitar; **ignorado em produção** |
 

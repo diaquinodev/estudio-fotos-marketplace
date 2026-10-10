@@ -92,7 +92,51 @@ describe('POST /api/generate — reserva antes, estorno em falha', () => {
     expect(res.status).toBe(200);
     expect(body.url).toMatch(/^data:image\/png;base64,/);
     expect(body.remainingCredits).toBe(4);
+    expect(body.provider).toBe('gemini');
+    expect(body.model).toBe('gemini-3.1-flash-image');
+    expect(generateContent).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'gemini-3.1-flash-image',
+      config: expect.objectContaining({
+        httpOptions: { timeout: 120_000 },
+        imageConfig: { aspectRatio: '1:1' },
+      }),
+    }));
     expect(order).toEqual(['reserve_credit', 'gemini', 'commit_reservation']);
+  });
+
+  it('permite trocar o modelo por configuração controlada no servidor', async () => {
+    vi.stubEnv('GEMINI_IMAGE_MODEL', 'gemini-nano-banana-2.1');
+    vi.stubEnv('GEMINI_REQUEST_TIMEOUT_MS', '45000');
+    generateContent.mockResolvedValue({ candidates: [{ content: { parts: [PNG] } }] });
+
+    const res = await POST(makeRequest());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.model).toBe('gemini-nano-banana-2.1');
+    expect(generateContent).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'gemini-nano-banana-2.1',
+      config: expect.objectContaining({ httpOptions: { timeout: 45_000 } }),
+    }));
+  });
+
+  it('rejeita configuração ausente ou modelo inválido antes de reservar crédito', async () => {
+    vi.stubEnv('GEMINI_API_KEY', '');
+    const semChave = await POST(makeRequest());
+    expect(semChave.status).toBe(500);
+
+    vi.stubEnv('GEMINI_API_KEY', 'chave-de-teste');
+    vi.stubEnv('GEMINI_IMAGE_MODEL', 'modelo com espaços');
+    const modeloInvalido = await POST(makeRequest());
+    expect(modeloInvalido.status).toBe(500);
+
+    vi.stubEnv('GEMINI_IMAGE_MODEL', 'gemini-3.1-flash-image');
+    vi.stubEnv('GEMINI_REQUEST_TIMEOUT_MS', '9999');
+    const timeoutInvalido = await POST(makeRequest());
+    expect(timeoutInvalido.status).toBe(500);
+
+    expect(calls('reserve_credit')).toHaveLength(0);
+    expect(generateContent).not.toHaveBeenCalled();
   });
 
   it('sucesso: persiste a imagem no Storage e registra em generations', async () => {
@@ -121,7 +165,7 @@ describe('POST /api/generate — reserva antes, estorno em falha', () => {
   });
 
   it('erro 429 do Gemini: sem imagem substituta, com estorno', async () => {
-    generateContent.mockRejectedValue(Object.assign(new Error('RESOURCE_EXHAUSTED'), { status: 429 }));
+    generateContent.mockRejectedValue(Object.assign(new Error('RESOURCE_EXHAUSTED chave-de-teste iVBORw0KGgo'), { code: 'RESOURCE_EXHAUSTED', status: 429 }));
     const res = await POST(makeRequest());
     const body = await res.json();
 
@@ -130,6 +174,22 @@ describe('POST /api/generate — reserva antes, estorno em falha', () => {
     expect(JSON.stringify(body)).not.toContain('unsplash');
     expect(calls('refund_reservation')).toHaveLength(1);
     expect(calls('commit_reservation')).toHaveLength(0);
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('chave-de-teste');
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('iVBORw0KGgo');
+  });
+
+  it('timeout do Gemini: responde 504 e estorna a reserva', async () => {
+    const timeout = Object.assign(new Error('Request timed out'), { name: 'APIConnectionTimeoutError' });
+    generateContent.mockRejectedValue(timeout);
+
+    const res = await POST(makeRequest());
+
+    expect(res.status).toBe(504);
+    expect(calls('refund_reservation')).toHaveLength(1);
+    expect(calls('commit_reservation')).toHaveLength(0);
+    expect(generateContent).toHaveBeenCalledWith(expect.objectContaining({
+      config: expect.objectContaining({ httpOptions: { timeout: 120_000 } }),
+    }));
   });
 
   it('resposta sem imagem: 502 e estorno', async () => {
