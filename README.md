@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/diaquinodev/estudio-fotos-marketplace/actions/workflows/ci.yml/badge.svg)](https://github.com/diaquinodev/estudio-fotos-marketplace/actions/workflows/ci.yml)
 
-Ferramenta **interna** para uma empresa ou microempreendedor gerar fotos de produto prontas para marketplaces, com **fidelidade à peça de referência**. O usuário envia fotos reais da peça (frente e costas), escolhe modelo, cenário e tipos de tomada, e o servidor monta o prompt e chama o Gemini. Não é um SaaS: não há venda de créditos, checkout nem planos; a cota de créditos de cada usuário é definida por um administrador.
+Ferramenta **interna** para uma empresa ou microempreendedor gerar fotos de produto prontas para marketplaces, com **fidelidade à peça de referência**. O usuário envia fotos reais da peça (frente e costas), escolhe modelo, cenário e tipos de tomada, e o servidor monta o prompt e chama a OpenRouter Image API. Não é um SaaS: não há venda de créditos, checkout nem planos; a cota de créditos de cada usuário é definida por um administrador.
 
 > "Ateliê Aurora" é uma marca de moda **fictícia**, usada apenas como exemplo de configuração (`src/config/brand.ts`). Qualquer semelhança com marcas reais é coincidência.
 
@@ -28,7 +28,7 @@ Cada item abaixo tem código correspondente e, quando indicado, teste automatiza
 - **Limite de requisições por usuário**: máximo de reservas por minuto (`RATE_LIMIT_PER_MINUTE`, padrão 20), aplicado dentro da própria função SQL.
 - **Galeria persistente**: cada imagem entregue é gravada no Supabase Storage (bucket privado) e registrada em `generations`; a galeria lê a tabela e exibe as imagens com URLs assinadas.
 - **Otimização de imagens no navegador** antes do envio (máx. 1600 px, WebP, correção de orientação EXIF) e **sessão do estúdio persistida em IndexedDB**.
-- **Erros claros**: falha do Gemini (429, bloqueio de segurança, resposta sem imagem, timeout) devolve erro explícito, sem imagem substituta e sem cobrança.
+- **Erros claros**: falha do provedor (429, bloqueio de segurança, resposta sem imagem, timeout) devolve erro explícito, sem imagem substituta e sem cobrança.
 
 ## Arquitetura
 
@@ -41,7 +41,7 @@ flowchart LR
 
   G -->|getUser via cookies SSR| SA
   G -->|1 reserve_credit<br/>débito atômico + limite/min| DB
-  G -->|2 prompt + imagens<br/>gemini-3.1-flash-image| GM[Google Gemini]
+  G -->|2 prompt + referências<br/>gpt-image-2.5-sunburst| GM[OpenRouter Image API]
   GM -->|imagem| G
   G -->|3a sucesso: grava arquivo| ST
   G -->|3a sucesso: registra generations<br/>e commit_reservation| DB
@@ -53,7 +53,7 @@ Fluxo de `/api/generate` (`src/app/api/generate/route.ts`):
 
 1. Autentica o usuário e valida o payload (tipo e tamanho das Data URLs).
 2. `reserve_credit` (service role): trava a linha do perfil, confere o limite por minuto e o saldo, debita e cria a reserva. Sem saldo → `403 INSUFFICIENT_CREDITS`; acima do limite → `429 RATE_LIMITED`.
-3. Chama o Gemini (até 2 novas tentativas com backoff em 429/503).
+3. Chama a OpenRouter uma única vez; falhas são estornadas para evitar cobrança duplicada.
 4. Sucesso → grava a imagem no Storage + linha em `generations`, `commit_reservation`, responde com a imagem e o saldo restante. Falha → `refund_reservation` (idempotente) e erro claro.
 5. Se apenas a persistência falhar, a imagem já gerada é entregue com `persisted: false` (não se perde nem se cobra de novo).
 
@@ -61,7 +61,7 @@ Fluxo de `/api/generate` (`src/app/api/generate/route.ts`):
 
 - Next.js 16 (App Router), React 19, TypeScript 5, Tailwind CSS 4, lucide-react
 - Supabase: Auth, Postgres (RLS + funções SQL) e Storage (`@supabase/ssr`, `@supabase/supabase-js`)
-- Google Gemini (`@google/genai`), modelo padrão `gemini-3.1-flash-image`
+- OpenRouter Image API, modelo padrão `openai/gpt-image-2.5-sunburst` com qualidade `max`
 - Vitest (testes) e ESLint 9; GitHub Actions (CI)
 
 ## Estrutura
@@ -71,12 +71,12 @@ src/
 ├─ app/
 │  ├─ page.tsx               # Estúdio (assistente de 3 etapas)
 │  ├─ gallery/  settings/  privacy/  login/  auth/callback/
-│  └─ api/generate/          # geração e retoque (reserva → Gemini → persistência)
+│  └─ api/generate/          # geração e retoque (reserva → OpenRouter → persistência)
 ├─ components/               # Sidebar, Topbar e etapas do estúdio
 ├─ config/brand.ts           # nome da marca de exemplo e e-mail de contato (placeholders)
 ├─ lib/
 │  ├─ credits.ts             # reserva / confirmação / estorno (orquestra as RPCs)
-│  ├─ generation.ts          # validação de Data URL, leitura da resposta do Gemini, classificação de erros
+│  ├─ generation.ts          # validação de Data URL e classificação de erros
 │  ├─ persistence.ts         # Storage + tabela generations
 │  └─ supabase-admin.ts      # cliente service role (somente servidor)
 ├─ services/                 # promptBuilder, estratégia de geração (cliente), IndexedDB
@@ -96,15 +96,17 @@ Somente nomes; os valores ficam fora do repositório (modelo em [`.env.example`]
 | `NEXT_PUBLIC_SUPABASE_URL` | URL do projeto Supabase |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Chave pública (anon) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Somente servidor: reserva de créditos e gravação das imagens |
-| `GEMINI_API_KEY` | Somente servidor |
-| `GEMINI_IMAGE_MODEL` | Opcional. Modelo de imagem usado no servidor (padrão `gemini-3.1-flash-image`) |
-| `GEMINI_REQUEST_TIMEOUT_MS` | Opcional. Tempo máximo por chamada ao Gemini, entre 10 e 300 segundos (padrão 120 segundos) |
+| `OPENROUTER_API_KEY` | Somente servidor |
+| `OPENROUTER_IMAGE_MODEL` | Opcional. Modelo de imagem usado no servidor (padrão `openai/gpt-image-2.5-sunburst`) |
+| `OPENROUTER_REQUEST_TIMEOUT_MS` | Opcional. Tempo máximo por chamada, entre 10 e 300 segundos (padrão 180 segundos) |
+| `OPENROUTER_IMAGE_QUALITY` | Opcional. Qualidade suportada pelo modelo (padrão `max`) |
+| `OPENROUTER_OUTPUT_COMPRESSION` | Opcional. Compressão quando suportada pelo modelo |
 | `RATE_LIMIT_PER_MINUTE` | Opcional. Gerações por usuário por minuto (padrão 20) |
-| `MOCK_GENERATION` | Opcional. `true` devolve um placeholder local sem chamar o Gemini e sem debitar; **ignorado em produção** |
+| `MOCK_GENERATION` | Opcional. `true` devolve um placeholder local sem chamar o provedor e sem debitar; **ignorado em produção** |
 
 ## Como rodar
 
-Pré-requisitos: Node.js 22+ (o CI usa 22; o Node 20 funciona com avisos), um projeto Supabase e uma chave da API do Gemini.
+Pré-requisitos: Node.js 22+ (o CI usa 22; o Node 20 funciona com avisos), um projeto Supabase e uma chave da OpenRouter.
 
 ```bash
 npm install
@@ -139,9 +141,9 @@ A função `public.admin_grant_credits(user_id, delta)` faz o mesmo ajuste via R
 - **Atomicidade no banco**: a serialização vem do `SELECT … FOR UPDATE` no perfil dentro de `reserve_credit`; o código TypeScript (`src/lib/credits.ts`) só orquestra.
 - **Sem mock silencioso**: a geração simulada exige flag explícita, não roda em produção, não debita e devolve um SVG local claramente rotulado.
 - **RLS por padrão**: o cliente autenticado só lê o próprio perfil e as próprias gerações; saldo, reservas e inserção em `generations` só pelo service role. As funções de saldo têm `EXECUTE` revogado de `anon`/`authenticated`.
-- **Chave do Gemini só no servidor** (`GEMINI_API_KEY`); a antiga janela que guardava uma chave no `localStorage` foi removida.
+- **Chave da OpenRouter só no servidor** (`OPENROUTER_API_KEY`); a antiga janela que guardava uma chave no `localStorage` foi removida.
 - **Prompt como código**: regras de fidelidade (fotos de referência como "fonte absoluta"), completar o look com peças neutras e bloqueio de conformidade para a capa, com testes.
-- **Strategy Pattern** no cliente para provedores de geração (hoje só o Gemini via `/api/generate`).
+- **Strategy Pattern** no cliente para geração via `/api/generate`; o provedor permanece somente no servidor.
 
 ## Limitações e próximos passos
 
@@ -149,7 +151,7 @@ A função `public.admin_grant_credits(user_id, delta)` faz o mesmo ajuste via R
 - **Sem tela de administração**: a cota é ajustada por SQL/RPC. Uma tela protegida por `role = 'admin'` é o próximo passo natural.
 - **`refund_stale_reservations` não está agendada**: é preciso chamá-la periodicamente (por exemplo, `pg_cron` ou uma rotina externa).
 - **Geração síncrona, uma imagem por requisição**: sem fila; o payload trafega em base64. O limite por minuto conta reservas por usuário, não é um rate limit global por IP.
-- **Sem testes de interface/E2E**: os testes cobrem prompt builder, lógica de créditos, rota de geração (com mocks do Supabase e do Gemini), persistência e migrações. A chamada real ao Gemini e o fluxo completo no navegador **não foram exercitados** neste repositório.
+- **Sem testes de interface/E2E**: os testes cobrem prompt builder, lógica de créditos, rota de geração (com mocks do Supabase e da OpenRouter), persistência e migrações. O fluxo completo no navegador ainda não foi exercitado neste repositório.
 - **Migrações validadas em PostgreSQL comum** com substitutos mínimos de `auth`/`storage` (`supabase/tests/stubs.sql`); não foram aplicadas em um projeto Supabase real.
 - **Sessão do estúdio no IndexedDB** guarda as fotos de referência em Data URL no navegador (pode ser pesado) e permanece após o logout no mesmo navegador.
 - **Aviso de privacidade** é um modelo curto de exemplo; revise com o responsável jurídico antes de usar.
@@ -161,7 +163,7 @@ Só a tela de login pôde ser capturada de forma automática, porque as demais e
 
 ![Tela de login](docs/screenshots/login.png)
 
-> As telas do estúdio e da galeria não têm captura neste repositório (é preciso um projeto Supabase e uma chave do Gemini configurados).
+> As telas do estúdio e da galeria não têm captura neste repositório (é preciso um projeto Supabase e uma chave da OpenRouter configurados).
 
 ## Licença
 

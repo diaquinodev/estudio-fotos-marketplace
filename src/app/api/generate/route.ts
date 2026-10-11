@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { GoogleGenAI } from '@google/genai';
 import {
   describeProviderFailure,
   getImageProviderConfig,
@@ -12,10 +11,10 @@ import { withCreditReservation } from '@/lib/credits';
 import { persistGeneration } from '@/lib/persistence';
 import {
   GenerationError,
-  classifyGeminiError,
-  extractGeneratedImage,
+  classifyImageProviderError,
   parseImageDataUrl,
 } from '@/lib/generation';
+import { generateOpenRouterImage } from '@/lib/openrouter-image';
 import { buildEditPrompt, buildGeminiSystemPrompt } from '@/services/promptBuilder';
 import type {
   ModelIdentity,
@@ -55,8 +54,6 @@ export interface GenerateApiRequest {
   highFidelityJson?: string;
 }
 
-type ContentPart = { text: string } | { inlineData: { mimeType: string; data: string } };
-
 /**
  * Modo simulado, SOMENTE para desenvolvimento local: exige MOCK_GENERATION=true e NODE_ENV diferente de
  * "production". Nunca debita créditos e devolve um placeholder gerado localmente (sem imagens externas).
@@ -75,49 +72,34 @@ function buildMockPlaceholder(): string {
   return `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
 }
 
-/** Repete a chamada em erros transitórios do Gemini (429/503), com backoff exponencial. */
-async function executeWithRetry<T>(fn: () => Promise<T>, retries = 2, baseDelayMs = 1200): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await fn();
-    } catch (err: unknown) {
-      const status = (err as { status?: number } | null)?.status;
-      const message = err instanceof Error ? err.message : String(err);
-      const isTransient = status === 429 || status === 503 || message.includes('429') || message.includes('RESOURCE_EXHAUSTED');
-      if (!isTransient || attempt >= retries) throw err;
-      await new Promise((resolve) => setTimeout(resolve, baseDelayMs * 2 ** attempt));
-    }
-  }
-}
-
-function buildParts(body: GenerateApiRequest, promptText: string): ContentPart[] {
-  const parts: ContentPart[] = [{ text: promptText }];
-
-  for (const dataUrl of [body.base64Images.front, body.base64Images.back]) {
-    const parsed = dataUrl ? parseImageDataUrl(dataUrl) : null;
-    if (parsed) parts.push({ inlineData: parsed });
-  }
+function buildReferenceImages(body: GenerateApiRequest): string[] {
+  const references = [body.base64Images.front, body.base64Images.back].filter(
+    (dataUrl): dataUrl is string => Boolean(dataUrl && parseImageDataUrl(dataUrl)),
+  );
 
   if (body.presentationMode === 'kit' && body.kitConfig?.variations) {
     for (const variation of body.kitConfig.variations.slice(0, body.kitConfig.quantity || 2)) {
-      const parsed = variation.url ? parseImageDataUrl(variation.url) : null;
-      if (parsed) parts.push({ inlineData: parsed });
+      if (variation.url && parseImageDataUrl(variation.url)) references.push(variation.url);
     }
   }
-  return parts;
+  return references;
 }
 
 export async function POST(req: NextRequest) {
   try {
-    // 1. Autenticação
-    const serverSupabase = await createSupabaseServerClient();
-    const {
-      data: { user },
-      error: authError,
-    } = await serverSupabase.auth.getUser();
-
-    if (authError || !user) {
-      return NextResponse.json({ error: 'Sessão não autorizada ou expirada. Faça login novamente.' }, { status: 401 });
+    // 1. Autenticação (em desenvolvimento ou modo simulado, aceita usuário de teste local)
+    let user: { id: string; email?: string } | null = null;
+    try {
+      const serverSupabase = await createSupabaseServerClient();
+      const {
+        data: { user: authUser },
+        error: authError,
+      } = await serverSupabase.auth.getUser();
+      if (!authError && authUser) {
+        user = authUser;
+      }
+    } catch {
+      // Ignora erro de Supabase em ambiente local/sem sessão
     }
 
     // 2. Validação do payload
@@ -129,7 +111,7 @@ export async function POST(req: NextRequest) {
     }
 
     let promptText: string;
-    let parts: ContentPart[];
+    let referenceImages: string[];
     let kind: 'generate' | 'edit' = 'generate';
     let instruction: string | undefined;
 
@@ -145,7 +127,7 @@ export async function POST(req: NextRequest) {
       kind = 'edit';
       instruction = editInstruction;
       promptText = buildEditPrompt(editInstruction, raw.additionalPrompt);
-      parts = [{ text: promptText }, { inlineData: target }];
+      referenceImages = [raw.base64TargetImage];
     } else {
       const body = raw as GenerateApiRequest;
       const front = body.base64Images?.front;
@@ -161,7 +143,7 @@ export async function POST(req: NextRequest) {
       }
       instruction = body.shotInstruction;
       promptText = buildGeminiSystemPrompt({ ...body, quantity: body.quantity ?? 1 });
-      parts = buildParts(body, promptText);
+      referenceImages = buildReferenceImages(body);
     }
 
     // 3. Modo simulado (apenas desenvolvimento, flag explícita). Não debita créditos.
@@ -171,13 +153,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, mock: true, url: placeholder, imageUrl: placeholder });
     }
 
-    // 4. Chave do Gemini (somente servidor)
+    if (!user) {
+      return NextResponse.json({ error: 'Sessão não autorizada ou expirada. Faça login novamente.' }, { status: 401 });
+    }
+
+    // 4. Configuração da OpenRouter (somente servidor)
     let providerConfig;
     try {
       providerConfig = getImageProviderConfig();
     } catch (error) {
       if (error instanceof ImageProviderConfigError) {
-        console.error('Configuração inválida do provedor de imagem:', { provider: 'gemini', code: error.code });
+        console.error('Configuração inválida do provedor de imagem:', { provider: 'openrouter', code: error.code });
         return NextResponse.json({ error: error.message }, { status: 500 });
       }
       throw error;
@@ -187,7 +173,6 @@ export async function POST(req: NextRequest) {
       provider: providerConfig.provider,
       model: providerConfig.model,
     };
-    const ai = new GoogleGenAI({ apiKey: providerConfig.apiKey });
     const admin = getSupabaseAdmin();
 
     // 5. Reserva atômica do crédito ANTES de gerar; estorno automático se a geração falhar.
@@ -195,36 +180,31 @@ export async function POST(req: NextRequest) {
       admin,
       user.id,
       async () => {
-        let response;
+        let image;
         try {
-          response = await executeWithRetry(() =>
-            ai.models.generateContent({
-              model: providerConfig.model,
-              contents: { parts },
-              config: {
-                httpOptions: { timeout: providerConfig.timeoutMs },
-                imageConfig: { aspectRatio: providerConfig.aspectRatio },
-              },
-            }),
-          );
+          image = await generateOpenRouterImage(providerConfig, {
+            prompt: promptText,
+            references: referenceImages,
+            userId: user.id,
+          });
         } catch (err) {
           console.error('Falha no provedor de imagem:', describeProviderFailure(err, providerConfig));
-          throw classifyGeminiError(err);
-        }
-
-        const image = extractGeneratedImage(response);
-        if (image.kind === 'blocked') {
-          throw new GenerationError(422, 'A geração foi bloqueada pelas políticas de segurança da IA. Ajuste os detalhes da peça. O crédito foi devolvido.');
-        }
-        if (image.kind === 'empty') {
-          throw new GenerationError(502, 'O modelo respondeu, mas não retornou uma imagem. O crédito foi devolvido.');
+          throw classifyImageProviderError(err);
         }
 
         // Persiste no Storage + tabela generations. Se falhar, a imagem ainda é entregue (o crédito foi
         // consumido por uma geração válida) e o cliente é avisado com persisted:false.
-        const saved = await persistGeneration(admin, { userId: user.id, dataUrl: image.dataUrl, kind, instruction });
+        const saved = await persistGeneration(admin, {
+          userId: user.id,
+          dataUrl: image.dataUrl,
+          kind,
+          instruction,
+          costUsd: image.costUsd,
+          provider: providerResult.provider,
+          model: providerResult.model,
+        });
         if (!saved.ok) console.error('Falha ao persistir a imagem gerada:', saved.error);
-        return { dataUrl: image.dataUrl, generationId: saved.ok ? saved.generationId : null };
+        return { dataUrl: image.dataUrl, generationId: saved.ok ? saved.generationId : null, costUsd: image.costUsd };
       },
       { onRefundError: (err) => console.error('Falha ao liquidar reserva de crédito:', err instanceof Error ? err.message : err) },
     );
@@ -249,6 +229,7 @@ export async function POST(req: NextRequest) {
       provider: providerResult.provider,
       model: providerResult.model,
       persisted: result.value.generationId !== null,
+      costUsd: result.value.costUsd,
     });
 
     return NextResponse.json({
@@ -260,6 +241,7 @@ export async function POST(req: NextRequest) {
       remainingCredits: result.remaining,
       provider: providerResult.provider,
       model: providerResult.model,
+      costUsd: result.value.costUsd,
     });
   } catch (error: unknown) {
     if (error instanceof GenerationError) {

@@ -426,8 +426,8 @@ export default function App() {
        }
     };
 
-    for (let i = 0; i < shotsToGenerate.length; i++) {
-      await executeShot(shotsToGenerate[i], i);
+    for (let index = 0; index < shotsToGenerate.length; index++) {
+      await executeShot(shotsToGenerate[index], index);
     }
     
     setGeneratedImages(prev => prev.map(img => 
