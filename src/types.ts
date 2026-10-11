@@ -152,4 +152,5 @@ export const SHOT_TYPES: ShotType[] = [
 ];
 
 export type { ImageOptimizationOptions, OptimizedImageResult } from './utils/imageOptimizer';
+export * from './domain/generation-contracts';
 

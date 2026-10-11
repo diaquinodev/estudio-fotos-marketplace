@@ -12,6 +12,12 @@ import { persistGeneration } from '@/lib/persistence';
 import {
   GenerationError,
   classifyImageProviderError,
+  MAX_ADDITIONAL_PROMPT_CHARS,
+  MAX_FIDELITY_JSON_CHARS,
+  MAX_GENERATION_REQUEST_BYTES,
+  MAX_REFERENCE_IMAGES,
+  MAX_SHOT_INSTRUCTION_CHARS,
+  MAX_TOTAL_REFERENCE_DATA_URL_CHARS,
   parseImageDataUrl,
 } from '@/lib/generation';
 import { generateOpenRouterImage } from '@/lib/openrouter-image';
@@ -85,6 +91,112 @@ function buildReferenceImages(body: GenerateApiRequest): string[] {
   return references;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function validateOptionalText(value: unknown, label: string, maxLength: number): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== 'string' || value.length > maxLength) {
+    return `${label} inválido (máximo de ${maxLength} caracteres).`;
+  }
+  return null;
+}
+
+function collectReferenceImages(body: Record<string, unknown>): string[] {
+  const base64Images = isRecord(body.base64Images) ? body.base64Images : {};
+  const references = [base64Images.front, base64Images.back].filter(
+    (value): value is string => typeof value === 'string',
+  );
+  const kitConfig = isRecord(body.kitConfig) ? body.kitConfig : null;
+  const variations = Array.isArray(kitConfig?.variations) ? kitConfig.variations : [];
+  for (const variation of variations) {
+    if (isRecord(variation) && typeof variation.url === 'string') references.push(variation.url);
+  }
+  return references;
+}
+
+function validateGeneratePayload(body: Record<string, unknown>): string | null {
+  if (body.mode !== undefined && body.mode !== 'generate') return 'Modo de geração inválido.';
+  if (!isRecord(body.base64Images)) return 'Informe as imagens de referência da peça.';
+  const base64Images = body.base64Images;
+  if (['front', 'back'].some((field) => {
+    const value = base64Images[field];
+    return value !== undefined && value !== null && typeof value !== 'string';
+  })) {
+    return 'Foto de referência inválida.';
+  }
+  if (typeof base64Images.front !== 'string' && typeof base64Images.back !== 'string') {
+    return 'É obrigatório fornecer ao menos uma foto de referência da peça (frente ou costas).';
+  }
+
+  const references = collectReferenceImages(body);
+  if (references.length > MAX_REFERENCE_IMAGES) {
+    return `A geração aceita no máximo ${MAX_REFERENCE_IMAGES} imagens de referência.`;
+  }
+  if (references.some((reference) => !parseImageDataUrl(reference))) {
+    return 'Foto de referência inválida (use JPG, PNG ou WebP de até ~10 MB).';
+  }
+  if (references.reduce((total, reference) => total + reference.length, 0) > MAX_TOTAL_REFERENCE_DATA_URL_CHARS) {
+    return 'O conjunto de imagens de referência é grande demais. Reduza ou otimize as fotos.';
+  }
+
+  if (typeof body.shotInstruction !== 'string' || !body.shotInstruction.trim() || body.shotInstruction.length > MAX_SHOT_INSTRUCTION_CHARS) {
+    return `A instrução da tomada é obrigatória e deve ter até ${MAX_SHOT_INSTRUCTION_CHARS} caracteres.`;
+  }
+  for (const [field, label] of [
+    ['modelId', 'modelo'],
+    ['env', 'ambiente'],
+    ['fabric', 'tecido'],
+    ['garment', 'peça'],
+    ['styling', 'styling'],
+  ] as const) {
+    if (!isRecord(body[field])) return `Configuração de ${label} inválida.`;
+  }
+
+  if (body.quantity !== undefined && ![1, 3, 10].includes(body.quantity as number)) {
+    return 'Quantidade de imagens inválida.';
+  }
+  if (body.presentationMode !== undefined && !['model', 'still', 'kit'].includes(body.presentationMode as string)) {
+    return 'Modo de apresentação inválido.';
+  }
+
+  const optionalTextErrors = [
+    validateOptionalText(body.additionalPrompt, 'Prompt adicional', MAX_ADDITIONAL_PROMPT_CHARS),
+    validateOptionalText(body.highFidelityJson, 'JSON de alta fidelidade', MAX_FIDELITY_JSON_CHARS),
+  ];
+  const textError = optionalTextErrors.find(Boolean);
+  if (textError) return textError;
+
+  if (body.kitConfig !== undefined) {
+    if (!isRecord(body.kitConfig) || ![2, 3, 4].includes(body.kitConfig.quantity as number)) {
+      return 'Configuração do kit inválida.';
+    }
+    if (!Array.isArray(body.kitConfig.variations) || body.kitConfig.variations.length > 4) {
+      return 'O kit deve possuir entre 1 e 4 variações.';
+    }
+    for (const variation of body.kitConfig.variations) {
+      if (!isRecord(variation) || typeof variation.id !== 'string' || typeof variation.label !== 'string' || variation.label.length > 100) {
+        return 'Variação de kit inválida.';
+      }
+      if (variation.url !== null && variation.url !== undefined && (typeof variation.url !== 'string' || !parseImageDataUrl(variation.url))) {
+        return 'Imagem de variação do kit inválida.';
+      }
+    }
+  }
+  return null;
+}
+
+function validateEditPayload(body: Record<string, unknown>): string | null {
+  if (!parseImageDataUrl(body.base64TargetImage)) {
+    return 'Imagem para retoque inválida (use JPG, PNG ou WebP de até ~10 MB).';
+  }
+  if (typeof body.editInstruction !== 'string' || !body.editInstruction.trim() || body.editInstruction.length > MAX_ADDITIONAL_PROMPT_CHARS) {
+    return `Informe a instrução de retoque (até ${MAX_ADDITIONAL_PROMPT_CHARS} caracteres).`;
+  }
+  return validateOptionalText(body.additionalPrompt, 'Prompt adicional', MAX_ADDITIONAL_PROMPT_CHARS);
+}
+
 export async function POST(req: NextRequest) {
   try {
     // 1. Autenticação (em desenvolvimento ou modo simulado, aceita usuário de teste local)
@@ -103,9 +215,20 @@ export async function POST(req: NextRequest) {
     }
 
     // 2. Validação do payload
+    const contentLength = req.headers.get('content-length');
+    if (contentLength && (!/^\d+$/.test(contentLength) || Number(contentLength) > MAX_GENERATION_REQUEST_BYTES)) {
+      return NextResponse.json({ error: 'Requisição grande demais.' }, { status: 413 });
+    }
+
     let raw: GenerateApiRequest | EditApiRequest;
     try {
-      raw = await req.json();
+      const requestText = await req.text();
+      if (new TextEncoder().encode(requestText).byteLength > MAX_GENERATION_REQUEST_BYTES) {
+        return NextResponse.json({ error: 'Requisição grande demais.' }, { status: 413 });
+      }
+      const parsed: unknown = JSON.parse(requestText);
+      if (!isRecord(parsed)) return NextResponse.json({ error: 'Corpo da requisição inválido.' }, { status: 400 });
+      raw = parsed as unknown as GenerateApiRequest | EditApiRequest;
     } catch {
       return NextResponse.json({ error: 'Corpo da requisição inválido.' }, { status: 400 });
     }
@@ -116,31 +239,17 @@ export async function POST(req: NextRequest) {
     let instruction: string | undefined;
 
     if (raw.mode === 'edit') {
-      const target = parseImageDataUrl(raw.base64TargetImage);
-      if (!target) {
-        return NextResponse.json({ error: 'Imagem para retoque inválida (use JPG, PNG ou WebP de até ~10 MB).' }, { status: 400 });
-      }
-      const editInstruction = typeof raw.editInstruction === 'string' ? raw.editInstruction.trim() : '';
-      if (!editInstruction || editInstruction.length > 1000) {
-        return NextResponse.json({ error: 'Informe a instrução de retoque (até 1000 caracteres).' }, { status: 400 });
-      }
+      const validationError = validateEditPayload(raw as unknown as Record<string, unknown>);
+      if (validationError) return NextResponse.json({ error: validationError }, { status: 400 });
+      const editInstruction = raw.editInstruction.trim();
       kind = 'edit';
       instruction = editInstruction;
       promptText = buildEditPrompt(editInstruction, raw.additionalPrompt);
       referenceImages = [raw.base64TargetImage];
     } else {
       const body = raw as GenerateApiRequest;
-      const front = body.base64Images?.front;
-      const back = body.base64Images?.back;
-      if (!front && !back) {
-        return NextResponse.json(
-          { error: 'É obrigatório fornecer ao menos uma foto de referência da peça (frente ou costas).' },
-          { status: 400 },
-        );
-      }
-      if ((front && !parseImageDataUrl(front)) || (back && !parseImageDataUrl(back))) {
-        return NextResponse.json({ error: 'Foto de referência inválida (use JPG, PNG ou WebP de até ~10 MB).' }, { status: 400 });
-      }
+      const validationError = validateGeneratePayload(body as unknown as Record<string, unknown>);
+      if (validationError) return NextResponse.json({ error: validationError }, { status: 400 });
       instruction = body.shotInstruction;
       promptText = buildGeminiSystemPrompt({ ...body, quantity: body.quantity ?? 1 });
       referenceImages = buildReferenceImages(body);
@@ -185,7 +294,6 @@ export async function POST(req: NextRequest) {
           image = await generateOpenRouterImage(providerConfig, {
             prompt: promptText,
             references: referenceImages,
-            userId: user.id,
           });
         } catch (err) {
           console.error('Falha no provedor de imagem:', describeProviderFailure(err, providerConfig));

@@ -2,6 +2,12 @@ import { SHOT_TYPES } from '@/types';
 
 /** Limite de tamanho (em caracteres da Data URL) por imagem de entrada: ~10 MB de base64. */
 export const MAX_IMAGE_DATA_URL_CHARS = 10_000_000;
+export const MAX_GENERATION_REQUEST_BYTES = 32 * 1024 * 1024;
+export const MAX_TOTAL_REFERENCE_DATA_URL_CHARS = 30_000_000;
+export const MAX_REFERENCE_IMAGES = 6;
+export const MAX_SHOT_INSTRUCTION_CHARS = 3_000;
+export const MAX_ADDITIONAL_PROMPT_CHARS = 1_000;
+export const MAX_FIDELITY_JSON_CHARS = 12_000;
 
 const ALLOWED_MIME = new Set(['image/png', 'image/jpeg', 'image/webp']);
 

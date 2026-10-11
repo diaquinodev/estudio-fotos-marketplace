@@ -130,7 +130,6 @@ describe('POST /api/generate — reserva antes, estorno em falha', () => {
       aspect_ratio: '1:1',
       quality: 'max',
       background: 'opaque',
-      user: 'user-1',
     });
     expect(request.body.input_references).toEqual([
       { type: 'image_url', image_url: { url: expect.stringMatching(/^data:image\/(png|jpeg|webp);base64,/) } },
@@ -311,6 +310,48 @@ describe('POST /api/generate — reserva antes, estorno em falha', () => {
     const res = await POST(req);
     expect(res.status).toBe(400);
     expect(calls('reserve_credit')).toHaveLength(0);
+  });
+
+  it('rejeita referência com tipo inválido antes de montar o prompt', async () => {
+    const req = new NextRequest('http://localhost/api/generate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(makeParams({ base64Images: { front: 123 as unknown as string } })),
+    });
+
+    const res = await POST(req);
+
+    expect(res.status).toBe(400);
+    expect(calls('reserve_credit')).toHaveLength(0);
+    expect(openRouterFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejeita payload com instrução longa antes de reservar crédito', async () => {
+    const req = new NextRequest('http://localhost/api/generate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(makeParams({ shotInstruction: 'x'.repeat(3_001) })),
+    });
+
+    const res = await POST(req);
+
+    expect(res.status).toBe(400);
+    expect(calls('reserve_credit')).toHaveLength(0);
+    expect(openRouterFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejeita configuração de kit inválida antes de reservar crédito', async () => {
+    const req = new NextRequest('http://localhost/api/generate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(makeParams({ kitConfig: { quantity: 4, variations: [{ id: 'v1', label: 'Cor 1', url: 'https://exemplo.com/foto.png' }] } })),
+    });
+
+    const res = await POST(req);
+
+    expect(res.status).toBe(400);
+    expect(calls('reserve_credit')).toHaveLength(0);
+    expect(openRouterFetch).not.toHaveBeenCalled();
   });
 });
 
