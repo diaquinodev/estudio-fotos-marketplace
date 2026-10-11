@@ -6,6 +6,12 @@ Ferramenta **interna** para uma empresa ou microempreendedor gerar fotos de prod
 
 > "Ateliê Aurora" é uma marca de moda **fictícia**, usada apenas como exemplo de configuração (`src/config/brand.ts`). Qualquer semelhança com marcas reais é coincidência.
 
+## Status do projeto
+
+O desenvolvimento está **em pausa**. Este repositório foi preservado como um MVP documentado e como material de portfólio. Não há, neste momento, compromisso de operação comercial ou de publicação automática em marketplaces.
+
+As imagens em `docs/screenshots/demo-*.png` são referências visuais sintéticas para demonstrar o fluxo no README. Elas não são evidência de fidelidade de uma geração feita pelo aplicativo e não substituem um teste com uma peça real.
+
 ## O problema (relato do autor)
 
 > **Relato do autor (Diego Aquino).** Narrativa do autor sobre o contexto de origem; não é verificável pelo código e não traz métricas. O cliente foi ficcionalizado.
@@ -48,6 +54,40 @@ flowchart LR
   G -->|3b falha: refund_reservation| DB
   G -->|imagem + saldo restante| U
 ```
+
+## Fluxo visual de uso
+
+O fluxo conceitual do MVP é:
+
+```mermaid
+flowchart LR
+  A[Login] --> B[Enviar frente e costas]
+  B --> C[Escolher modo]
+  C --> D[Configurar modelo, cenário e tomada]
+  D --> E[Montar prompt estruturado]
+  E --> F[Reservar crédito]
+  F --> G[Gerar uma imagem]
+  G --> H{Persistência válida?}
+  H -->|sim| I[Salvar na galeria]
+  H -->|não| J[Entregar imagem e informar falha de persistência]
+  G -->|erro do provedor| K[Estornar crédito e mostrar erro]
+```
+
+### Referências demonstrativas
+
+**1. Still frontal / manequim invisível**
+
+![Exemplo de Still frontal](docs/screenshots/demo-still.png)
+
+**2. Peça em modelo**
+
+![Exemplo de peça em modelo](docs/screenshots/demo-model.png)
+
+**3. Capa de kit com três variações**
+
+![Exemplo de capa de kit](docs/screenshots/demo-kit.png)
+
+Esses três arquivos servem para apresentar a ideia de entrada, composição com modelo e kit. Foram conferidos visualmente como artefatos documentais; não foram enviados ao endpoint do aplicativo.
 
 Fluxo de `/api/generate` (`src/app/api/generate/route.ts`):
 
@@ -126,6 +166,27 @@ TEST_DATABASE_URL=postgres://usuario:senha@localhost:5432/banco_descartavel npm 
 npm run build                      # exige apenas as variáveis públicas do Supabase (valores fictícios bastam)
 ```
 
+### Resultado da última validação documental
+
+Os comandos abaixo foram executados neste worktree em 11/10/2026:
+
+| Verificação | Resultado observado |
+|---|---|
+| `npm test -- --reporter=verbose` | **Passou:** 5 arquivos e 66 testes; 1 arquivo e 12 testes de banco foram pulados sem `TEST_DATABASE_URL`. |
+| `npm run typecheck` | **Passou:** `tsc --noEmit` terminou sem saída de erro. |
+| `npm run lint` | **Não concluído:** excedeu 90 segundos; não foi declarado como aprovado. |
+| `npx eslint src tests --max-warnings=0` | **Não concluído:** também excedeu 90 segundos. |
+| `npm run build` | **Não concluído:** excedeu 120 segundos; não foi declarado como aprovado. |
+
+Para executar também os testes de migração no PowerShell, configure um PostgreSQL descartável antes de rodar:
+
+```powershell
+$env:TEST_DATABASE_URL = "postgres://usuario:senha@localhost:5432/banco_descartavel"
+npm test
+```
+
+O timeout do lint e do build ficou registrado como pendência do snapshot. Como o projeto está congelado, essa investigação não faz parte desta entrega documental.
+
 Administração da cota (não há tela de administração; ver limitações). Novos usuários recebem 3 créditos (valor definido na migração `20260929120000_profiles.sql`). No SQL Editor do Supabase:
 
 ```sql
@@ -159,11 +220,13 @@ A função `public.admin_grant_credits(user_id, delta)` faz o mesmo ajuste via R
 
 ## Capturas de tela
 
-Só a tela de login pôde ser capturada de forma automática, porque as demais exigem uma sessão do Supabase:
+Só a tela de login pôde ser capturada automaticamente a partir da aplicação, porque as demais exigem uma sessão do Supabase:
 
 ![Tela de login](docs/screenshots/login.png)
 
-> As telas do estúdio e da galeria não têm captura neste repositório (é preciso um projeto Supabase e uma chave da OpenRouter configurados).
+> As imagens `demo-still.png`, `demo-model.png` e `demo-kit.png` são referências visuais sintéticas para documentação, não capturas da interface.
+
+> As telas autenticadas do estúdio e da galeria ainda não têm captura da aplicação neste repositório; é preciso um projeto Supabase e uma chave da OpenRouter configurados.
 
 ## Licença
 

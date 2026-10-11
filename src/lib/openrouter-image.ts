@@ -36,7 +36,7 @@ function supportedMimeType(value: unknown): string | null {
 
 export async function generateOpenRouterImage(
   config: ImageProviderConfig,
-  input: { prompt: string; references: string[]; userId: string },
+  input: { prompt: string; references: string[] },
 ): Promise<OpenRouterImageResult> {
   const response = await fetch(config.endpoint, {
     method: 'POST',
@@ -55,7 +55,6 @@ export async function generateOpenRouterImage(
       quality: config.quality,
       ...(config.outputCompression !== undefined ? { output_compression: config.outputCompression } : {}),
       background: config.background,
-      user: input.userId,
     }),
     signal: AbortSignal.timeout(config.timeoutMs),
   });
