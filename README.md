@@ -4,7 +4,7 @@
 
 Ferramenta **interna** para uma empresa ou microempreendedor gerar fotos de produto prontas para marketplaces, com **fidelidade à peça de referência**. O usuário envia fotos reais da peça (frente e costas), escolhe modelo, cenário e tipos de tomada, e o servidor monta o prompt e chama a OpenRouter Image API. Não é um SaaS: não há venda de créditos, checkout nem planos; a cota de créditos de cada usuário é definida por um administrador.
 
-> "Ateliê Aurora" é uma marca de moda **fictícia**, usada apenas como exemplo de configuração (`src/config/brand.ts`). Qualquer semelhança com marcas reais é coincidência.
+> O case foi construído na **AJ-Moda**. No código, `Ateliê Aurora` é apenas o nome fictício usado na configuração de exemplo (`src/config/brand.ts`); o relato abaixo descreve o problema real observado na empresa.
 
 ## Status do projeto
 
@@ -12,11 +12,17 @@ O desenvolvimento está **em pausa**. Este repositório foi preservado como um M
 
 As imagens em `docs/screenshots/demo-*.png` são referências visuais sintéticas para demonstrar o fluxo no README. Elas não são evidência de fidelidade de uma geração feita pelo aplicativo e não substituem um teste com uma peça real.
 
-## O problema (relato do autor)
+## O problema e o case real
 
-> **Relato do autor (Diego Aquino).** Narrativa do autor sobre o contexto de origem; não é verificável pelo código e não traz métricas. O cliente foi ficcionalizado.
+> **Relato do autor (Diego Aquino).** Case construído na AJ-Moda. Os resultados de tempo e adoção abaixo foram observados durante o protótipo, mas não foram medidos por telemetria neste repositório.
 
-Um cliente do ramo de marketplace tinha como maior gargalo operacional a geração de imagens para e-commerce e marketplaces: a tarefa consumia horas do dia dos colaboradores, que não sabiam escrever prompts eficazes, e o resultado era inconsistente. O autor construiu esta ferramenta para gerar fotos específicas para marketplace, fiéis a uma peça de referência, com modelo e cenário personalizáveis, sem que o usuário precise escrever prompts do zero.
+A AJ-Moda tinha um gargalo operacional na geração de imagens para o site e os marketplaces. Os analistas de e-commerce e a equipe de marketing precisavam criar as fotos manualmente, usando prompts sem estrutura em chats de IA. O processo consumia boa parte da manhã e frequentemente exigia várias tentativas até chegar a um resultado fidedigno e padronizado para a marca.
+
+O autor construiu um protótipo de MVP com prompts estruturados, referências da peça e escolhas de modelo, cenário e tomada. O protótipo foi enviado para as equipes usarem durante alguns dias. Segundo a observação do autor, houve padronização do fluxo e uma otimização de **100%** nas tarefas que antes ocupavam a manhã dos colaboradores: com apenas as fotos de frente e costas, o colaborador conseguia solicitar até 10 imagens em menos de 5 minutos.
+
+### Escopo acadêmico complementar
+
+O banco de dados, o sistema de créditos e o dashboard de precificação foram adicionados posteriormente para fins de estudo e portfólio. Na época, a empresa também tinha interesse em utilizar essa estrutura com seus alunos. Esses componentes demonstram a evolução técnica do projeto, mas não devem ser confundidos com o resultado do protótipo originalmente validado pelas equipes da AJ-Moda.
 
 ## Funcionalidades (verificadas)
 
